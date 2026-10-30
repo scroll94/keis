@@ -6,6 +6,8 @@ GET  /api/info                      что доступно интерфейсу
 GET  /api/queue                     очередь для интерфейса
 POST /api/tickets                   новое обращение из интерфейса
 POST /api/tickets/{id}/decision     решение админа: отправить, сохранить правку, эскалировать
+POST /api/tickets/bulk              то же сразу для многих обращений; reopen отменяет решение
+GET  /api/quick                     быстрые ответы на языке игрока
 POST /api/batches                   пачка обращений из файла: разбирается в фоне
 POST /api/batches/sample            пачка из валидации кейса (без ответов админов)
 GET  /api/jobs/{id}                 прогресс и сводка пачки
@@ -34,6 +36,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import drafts, rules
 from .config import ARTIFACTS, ROOT, VALID_PATH
 from .triage import Triage
 
@@ -75,8 +78,14 @@ class Ticket(BaseModel):
 
 
 class Decision(BaseModel):
-    action: Literal["send", "save", "escalate"]
+    action: Literal["send", "save", "escalate", "reopen"]
     text: str | None = None
+
+
+class BulkDecision(BaseModel):
+    ids: list[str]
+    action: Literal["send", "escalate", "reopen"]
+    text: str | None = None  # общий текст для всех; {ник} заменяется ником из каждого обращения
 
 
 class BatchIn(BaseModel):
@@ -140,28 +149,41 @@ class Queue:
         with self.lock:
             return list(self.items.values())
 
-    def decide(self, ticket_id: str, d: Decision) -> dict:
+    def decide(self, ticket_id: str, action: str, text: str | None = None) -> dict:
         with self.lock:
             item = self.items.get(ticket_id)
             if not item:
                 raise KeyError(ticket_id)
-            draft = item["result"]["draft"]["text"]
-            final = (d.text or "").strip() or item["final_text"] or draft
+            return self._apply(ticket_id, item, action, text)
+
+    def decide_many(self, ids: list[str], action: str, text: str | None = None) -> list[dict]:
+        with self.lock:
+            return [self._apply(i, self.items[i], action, text) for i in ids if i in self.items]
+
+    def _apply(self, ticket_id: str, item: dict, action: str, text: str | None) -> dict:
+        r = item["result"]
+        draft = r["draft"]["text"]
+        now = datetime.now().isoformat(timespec="seconds")
+        if action == "reopen":  # отмена решения: обращение снова в очереди
+            item.update(status="new", final_text=None, decided_at=None)
+            final = draft
+        else:
+            typed = (text or "").strip().replace("{ник}", r["extracted"].get("nickname") or "этого игрока")
+            final = typed or item["final_text"] or draft
             item["final_text"] = final if final != draft else None
-            if d.action != "save":
-                item["status"] = "sent" if d.action == "send" else "escalated"
-            item["decided_at"] = datetime.now().isoformat(timespec="seconds")
-            r = item["result"]
-            record = {
-                "ts": item["decided_at"], "ticket_id": ticket_id, "action": d.action,
-                "category": r["category"], "priority": r["priority"], "language": r["language"],
-                "template": r["draft"]["template"], "needs_human": r["needs_human"],
-                "draft": draft, "final": final, "edited": final != draft,
-            }
-            ARTIFACTS.mkdir(exist_ok=True)
-            with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            return item
+            item["decided_at"] = now
+            if action != "save":
+                item["status"] = "sent" if action == "send" else "escalated"
+        record = {
+            "ts": now, "ticket_id": ticket_id, "action": action,
+            "category": r["category"], "priority": r["priority"], "language": r["language"],
+            "template": r["draft"]["template"], "needs_human": r["needs_human"],
+            "draft": draft, "final": final, "edited": final != draft,
+        }
+        ARTIFACTS.mkdir(exist_ok=True)
+        with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return item
 
 
 class BatchJob:
@@ -272,12 +294,38 @@ def add_ticket(ticket: Ticket):
     return queue.add(t, source="form")
 
 
+@app.post("/api/tickets/bulk")
+def decide_bulk(b: BulkDecision):
+    return {"items": queue.decide_many(b.ids, b.action, b.text)}
+
+
 @app.post("/api/tickets/{ticket_id}/decision")
 def decide(ticket_id: str, d: Decision):
     try:
-        return queue.decide(ticket_id, d)
+        return queue.decide(ticket_id, d.action, d.text)
     except KeyError:
         raise HTTPException(404, f"нет обращения {ticket_id}")
+
+
+# Быстрые ответы: готовые шаблоны, цитаты только из правил, обещаний нет (см. drafts.py)
+QUICK_REPLIES = [
+    ("complaint_no_evidence", "Нужны доказательства", ["ЖБ 1.2.2", "ЖБ 1.3.1"]),
+    ("complaint_invalid", "Неверное оформление", ["ЖБ 1.2.3", "ЖБ 1.3.1"]),
+    ("complaint_rejected", "Нарушений нет", ["ЖБ 1.3.1"]),
+    ("already_punished", "Уже наказан", []),
+    ("duplicate", "Повтор", ["ЖБ 1.2.9"]),
+    ("appeal_rejected", "Наказание верно", ["ОП 3.4"]),
+    ("report_complaint", "Как подать жалобу", ["ЖБ 1.3.1"]),
+    ("offtopic", "Опишите подробнее", ["ОП 3.1"]),
+    ("help", "Администратор поможет", []),
+]
+
+
+@app.get("/api/quick")
+def quick_replies(lang: str = "ru"):
+    return [{"id": s, "title": title, "text": drafts.render(s, lang, codes),
+             "citations": rules.validate_citations([{"ref": c} for c in codes])}
+            for s, title, codes in QUICK_REPLIES]
 
 
 def _start_batch(name: str, tickets: list[dict]) -> dict:
