@@ -32,31 +32,32 @@ QUEUE_PATH = Path(os.environ.get("COPILOT_QUEUE", ROOT / "demo" / "tickets.json"
 FEEDBACK_PATH = ARTIFACTS / "feedback.jsonl"
 
 
+# Модели запроса терпимы к типам: кривые поля приводит triage._normalize, а не ошибка 422
 class Attachment(BaseModel):
-    type: str = "image"
+    type: str | None = "image"
     url: str | None = None
 
 
 class Message(BaseModel):
-    role: Literal["player", "reported_player", "admin"] = "player"
+    role: str | None = "player"  # player | reported_player | admin
     ts: str | None = None
-    text: str = ""
-    attachments: list[Attachment] = Field(default_factory=list)
+    text: str | None = ""
+    attachments: list[Attachment] | None = Field(default_factory=list)
 
 
 class Ticket(BaseModel):
-    ticket_id: str | None = None
-    kind: Literal["complaint", "report"] = "report"
+    ticket_id: str | int | None = None
+    kind: str | None = "report"  # complaint | report
     created_at: str | None = None
-    region: str | None = None
+    region: str | int | None = None
     server_lang: str | None = None
     lang: str | None = None
     reporter_hash: str | None = None
     reported_hash: str | None = None
     reported_nick: str | None = None
-    rule_refs_raw: str | None = None
-    images_count: int = 0
-    messages: list[Message]
+    rule_refs_raw: str | int | float | None = None
+    images_count: int | str | None = 0
+    messages: list[Message] | str | None = Field(default_factory=list)
 
 
 class Decision(BaseModel):

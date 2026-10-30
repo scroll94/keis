@@ -1,6 +1,6 @@
 """Основной конвейер триажа: тикет (dict) -> ответ по контракту (dict)."""
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from . import drafts, rules
 from .classify import Model, VerdictModel, keyword_category, priority
@@ -67,9 +67,67 @@ class DedupStore:
 
 def _parse_ts(s: str | None) -> datetime:
     try:
-        return datetime.fromisoformat(s) if s else datetime.now()
-    except ValueError:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00")) if s else datetime.now()
+    except (ValueError, AttributeError):
         return datetime.now()
+    # Время с часовым поясом приводим к UTC без пояса, чтобы его можно было сравнивать с остальными
+    return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+
+
+MAX_TEXT = 20_000  # длиннее этого текст игрока обрезается: держит задержку на огромных сообщениях
+
+
+def _normalize(t) -> dict:
+    """Приводит тикет к ожидаемым типам: кривое поле не должно ронять разбор."""
+    t = dict(t) if isinstance(t, dict) else {}
+    msgs = t.get("messages")
+    if isinstance(msgs, str):
+        msgs = [{"role": "player", "text": msgs}]
+    elif not isinstance(msgs, list):
+        msgs = []
+    clean = []
+    for m in msgs:
+        if isinstance(m, str):
+            m = {"role": "player", "text": m}
+        if not isinstance(m, dict):
+            continue
+        text = "" if m.get("text") is None else str(m.get("text"))[:MAX_TEXT]
+        attachments = m.get("attachments") if isinstance(m.get("attachments"), list) else []
+        clean.append({**m, "role": m.get("role") or "player", "text": text, "attachments": attachments})
+    t["messages"] = clean
+    if t.get("kind") not in ("complaint", "report"):
+        t["kind"] = "complaint" if t.get("reported_hash") or t.get("reported_nick") else "report"
+    for k in ("ticket_id", "created_at", "region", "server_lang", "reporter_hash", "reported_hash", "reported_nick", "rule_refs_raw"):
+        v = t.get(k)
+        t[k] = None if v is None or isinstance(v, (list, dict)) else str(v)
+    try:
+        t["images_count"] = max(0, int(t.get("images_count") or 0))
+    except (TypeError, ValueError):
+        t["images_count"] = 0
+    return t
+
+
+def _fallback(t, error: Exception) -> dict:
+    """Ответ по контракту, если разбор всё же упал: черновик-подтверждение и обязательно человек."""
+    t = t if isinstance(t, dict) else {}
+    kind = t.get("kind") if t.get("kind") in ("complaint", "report") else "report"
+    return {
+        "ticket_id": t.get("ticket_id"),
+        "language": "ru",
+        "category": "complaint.other" if kind == "complaint" else "report.question",
+        "priority": "p2",
+        "is_spam": False,
+        "is_duplicate": False,
+        "duplicate_of": None,
+        "extracted": {"reported_nick": None, "player_ids": [], "rule_refs_claimed": [], "rule_refs_raw": None,
+                      "has_evidence": False, "evidence": {"images_count": 0, "links": 0}, "server": None, "region": None},
+        "draft": {"text": drafts.render("help", "ru", []), "language": "ru", "citations": [], "template": "fallback"},
+        "needs_human": True,
+        "needs_human_reasons": ["обращение не удалось разобрать автоматически"],
+        "suggested_verdict": None,
+        "confidence": 0.0,
+        "reasons": [f"ошибка разбора: {type(error).__name__}"],
+    }
 
 
 def _violation_codes(category: str, text: str, claimed: list[str]) -> list[str]:
@@ -106,7 +164,14 @@ class Triage:
         self.llm = LLM.from_env() if use_llm else None
 
     def __call__(self, t: dict) -> dict:
-        kind = t.get("kind", "report")
+        """Разбор одного тикета. Не падает: один кривой тикет не должен ронять пакетный прогон."""
+        try:
+            return self._triage(_normalize(t))
+        except Exception as e:
+            return _fallback(t, e)
+
+    def _triage(self, t: dict) -> dict:
+        kind = t["kind"]
         server_lang = t.get("server_lang")
         msgs = [m for m in t.get("messages", []) if m.get("role") == "player"]
         raw = "\n".join(m.get("text", "") for m in msgs)

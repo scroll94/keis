@@ -90,6 +90,55 @@ class TriageTest(unittest.TestCase):
         self.assertEqual(r["language"], "uz")
 
 
+class MalformedInputTest(unittest.TestCase):
+    """Скрытый тест может прислать что угодно: разбор не должен падать ни на одном тикете."""
+
+    CASES = {
+        "нет сообщений": {"messages": []},
+        "нет поля messages": {"messages": None},
+        "text = None": {"messages": [{"role": "player", "text": None}]},
+        "kind = appeal": {"kind": "appeal"},
+        "kind = None": {"kind": None},
+        "дата с зоной": {"created_at": "2026-10-30T12:00:00Z"},
+        "кривая дата": {"created_at": "вчера"},
+        "rule_refs_raw числом": {"kind": "complaint", "rule_refs_raw": 2.1},
+        "images_count строкой": {"kind": "complaint", "images_count": "2"},
+        "messages строкой": {"messages": "помогите застрял"},
+        "attachments не список": {"messages": [{"role": "player", "text": "скрин", "attachments": 3}]},
+        "огромный текст": {"messages": [{"role": "player", "text": "оск родни " * 10000}]},
+    }
+
+    def test_triage_never_crashes(self):
+        tri = Triage(use_llm=False)
+        for name, patch in self.CASES.items():
+            t = {"ticket_id": name, "kind": "report", "created_at": "2026-10-30T12:00:00",
+                 "messages": [{"role": "player", "text": "помогите"}], **patch}
+            r = tri(t)
+            self.assertNotEqual(r["draft"].get("template"), "fallback", name)  # разобран по-настоящему
+            self.assertTrue(r["draft"]["text"] and r["category"], name)
+
+    def test_fallback_keeps_contract(self):
+        tri = Triage(use_llm=False)
+        tri._triage = lambda t: 1 / 0  # любая непредвиденная ошибка внутри разбора
+        r = tri({"ticket_id": "x", "kind": "complaint", "messages": []})
+        self.assertEqual(r["ticket_id"], "x")
+        self.assertTrue(r["needs_human"])
+        self.assertEqual(r["category"], "complaint.other")
+        self.assertEqual(r["draft"]["template"], "fallback")
+
+    def test_http_accepts_malformed(self):
+        from fastapi.testclient import TestClient
+
+        from copilot.api import app
+
+        client = TestClient(app)
+        for body in ({"kind": "appeal", "messages": [{"text": None}]}, {"messages": "помогите"},
+                     {"ticket_id": 5, "rule_refs_raw": 2.1, "images_count": "1", "kind": "complaint", "messages": []}):
+            r = client.post("/triage", json=body)
+            self.assertEqual(r.status_code, 200, body)
+            self.assertIn("category", r.json())
+
+
 class LLMGuardTest(unittest.TestCase):
     def setUp(self):
         self.llm = object.__new__(LLM)
