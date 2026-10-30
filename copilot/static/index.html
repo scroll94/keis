@@ -25,6 +25,8 @@
     <nav>
       <div class="nav-label">Очередь</div>
       <div id="nav"></div>
+      <div class="nav-label">Проверка</div>
+      <div id="nav-tools"></div>
     </nav>
     <div class="sidebar-foot" id="mode"></div>
   </aside>
@@ -44,21 +46,26 @@
   <main class="sheet">
     <div class="title-row">
       <div>
-        <h1>Очередь обращений</h1>
+        <h1 id="page-title">Очередь обращений</h1>
         <p class="finding" id="finding">Загружаю очередь…</p>
       </div>
       <p class="flash" id="flash" role="status" aria-live="polite"></p>
     </div>
-    <div class="panes">
+    <div class="panes" id="panes">
       <section class="list-pane" aria-labelledby="list-title">
         <div class="list-head">
-          <h2 id="list-title">Ждут администратора</h2>
+          <div class="list-head-row">
+            <h2 id="list-title">Ждут администратора</h2>
+            <div id="list-source"></div>
+          </div>
           <span class="meta" id="list-meta"></span>
         </div>
         <ul class="list" id="list" aria-label="Обращения"></ul>
       </section>
       <section class="detail" id="detail" aria-label="Обращение"></section>
     </div>
+    <section class="tool" id="batch-view" aria-label="Загрузка обращений" hidden></section>
+    <section class="tool" id="load-view" aria-label="Проверка нагрузки" hidden></section>
   </main>
 </div>
 

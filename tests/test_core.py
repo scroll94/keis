@@ -221,6 +221,66 @@ class AdminUiTest(unittest.TestCase):
             self.assertEqual(client.post("/api/tickets/nope/decision", json={"action": "send"}).status_code, 404)
 
 
+class BatchAndLoadTest(unittest.TestCase):
+    def wait_job(self, client, job_id, timeout=30):
+        import time
+
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if job["finished"]:
+                return job
+            time.sleep(0.05)
+        self.fail("пачка не разобралась вовремя")
+
+    def test_batch_upload_lands_in_queue(self):
+        from fastapi.testclient import TestClient
+
+        import copilot.api as api
+
+        client = TestClient(api.app)
+        tickets = [ticket("оск родни <url>", kind="complaint", ticket_id=f"b-{i}", reporter=f"br{i}", images_count=1)
+                   for i in range(3)] + [{"messages": "помогите застрял"}]  # и один кривой
+        job = client.post("/api/batches", json={"name": "тест", "tickets": tickets}).json()
+        job = self.wait_job(client, job["id"])
+        self.assertEqual((job["done"], job["total"]), (4, 4))
+        self.assertIsNone(job["error"])
+        self.assertEqual(job["needs_human"] + job["auto"], 4)
+        self.assertIn("complaint.insult", dict(job["categories"]))
+        queue = client.get("/api/queue").json()
+        mine = [it for it in queue["items"] if it["source"] == job["id"]]
+        self.assertEqual(len(mine), 4)
+        self.assertTrue(all(it["processing_ms"] >= 0 for it in mine))
+        self.assertEqual(client.post("/api/batches", json={"name": "пусто", "tickets": []}).status_code, 400)
+
+    def test_validation_sample_has_no_admin_answers(self):
+        from fastapi.testclient import TestClient
+
+        import copilot.api as api
+
+        if not api.VALID_PATH.exists():
+            self.skipTest("нет данных валидации")
+        client = TestClient(api.app)
+        job = self.wait_job(client, client.post("/api/batches/sample", json={"n": 5}).json()["id"])
+        self.assertEqual(job["done"], 5)
+        items = [it for it in client.get("/api/queue").json()["items"] if it["source"] == job["id"]]
+        self.assertTrue(all(m["role"] != "admin" for it in items for m in it["ticket"]["messages"]))
+        self.assertTrue(all("verdict" not in it["ticket"] for it in items))
+
+    def test_loadgen_summary(self):
+        from copilot.loadgen import BUCKETS, summarize
+
+        lat = [3.0] * 90 + [40.0] * 8 + [1800.0, 7000.0]
+        slow = [{"ms": 7000.0, "server_ms": 6.0, "ticket": "a", "llm": None, "ok": True},
+                {"ms": 1800.0, "server_ms": 1790.0, "ticket": "b", "llm": "LLM 1780 мс", "ok": True}]
+        s = summarize(lat, total=100, errors=1, elapsed=2.0, llm={"calls": 1}, finished=True, slowest=slow)
+        self.assertEqual((s["done"], s["rps"], s["p50_ms"]), (100, 50.0, 3.0))
+        self.assertEqual(s["hist"][0], 90)                 # до 5 мс
+        self.assertEqual(s["hist"][len(BUCKETS)], 1)      # больше 5 с
+        self.assertEqual(sum(s["hist"]), 100)
+        self.assertEqual([x["ticket"] for x in s["slowest"]], ["a", "b"])
+
+
 class ApiTest(unittest.TestCase):
     def test_post_triage(self):
         from fastapi.testclient import TestClient

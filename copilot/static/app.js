@@ -27,6 +27,15 @@ const VERDICT = {
   invalid_format: "неверное оформление", duplicate: "дубль", already_punished: "игрок уже наказан",
   appeal_approved: "снять наказание", appeal_rejected: "оставить наказание",
 };
+const TEMPLATE = {
+  complaint_review: "жалоба принята к рассмотрению", complaint_no_evidence: "нужны доказательства",
+  complaint_invalid: "неверное оформление", complaint_rejected: "нарушений не выявлено",
+  already_punished: "игрок уже наказан", duplicate: "повтор обращения", appeal: "обращение по наказанию",
+  appeal_rejected: "наказание оставлено", offtopic: "просьба описать проблему", help: "запрос помощи",
+  question: "просьба уточнить вопрос", question_kb: "ответ из базы прошлых ответов",
+  report_complaint: "как подать жалобу", account: "аккаунт и безопасность", payment: "проверка платежа",
+  fallback: "запасной ответ",
+};
 
 const VIEWS = [
   { id: "waiting", title: "Ждут администратора", count: true, test: (it) => it.status === "new" && it.result.needs_human,
@@ -37,8 +46,18 @@ const VIEWS = [
   { id: "escalated", title: "Эскалированы", test: (it) => it.status === "escalated", empty: "Эскалированных обращений пока нет." },
   { id: "sent", title: "Отправлены", test: (it) => it.status === "sent", empty: "Отправленных ответов пока нет." },
 ];
+const TOOLS = [
+  { id: "batch", title: "Загрузка обращений", sub: "Файл с обращениями разбирается тем же конвейером, что и обращения из игры. Каждое обращение попадает в очередь." },
+  { id: "load", title: "Проверка нагрузки", nav: "Нагрузка", sub: "Запросы идут на POST /triage этого сервиса из отдельного процесса — так, как их будет присылать игра." },
+];
 
-const state = { items: [], llm: null, view: "waiting", selected: null, query: "", loading: true, error: null, dirty: false, note: "" };
+const state = {
+  items: [], llm: null, batches: [], info: null,
+  mode: "queue", view: "waiting", source: "all", selected: null, query: "",
+  loading: true, error: null, dirty: false, note: "",
+  job: null, jobError: "", load: null, loadError: "", loadN: 500, loadC: 10, loadSource: "demo",
+};
+const timers = { job: null, load: null };
 const $ = (id) => document.getElementById(id);
 
 // Элементы создаются только через textContent: текст игроков никогда не попадает в разметку как HTML
@@ -63,10 +82,16 @@ function plural(n, one, few, many) {
   if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
   return many;
 }
+const fmtNum = (n) => Number(n).toLocaleString("ru-RU");
+const dec = (x, d) => Number(x).toLocaleString("ru-RU", { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtMs = (x) => (x == null ? "—" : x < 1000 ? `${x < 10 ? dec(x, 1) : Math.round(x)} мс` : `${dec(x / 1000, 2)} с`);
+const fmtSec = (s) => (s < 60 ? `${dec(s, 1)} с` : `${Math.floor(s / 60)} мин ${Math.round(s % 60)} с`);
+const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : "0%");
 
 function fmtTime(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
   const time = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
   const today = new Date().toDateString() === d.toDateString();
   return today ? time : `${d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}, ${time}`;
@@ -74,45 +99,59 @@ function fmtTime(iso) {
 
 // Метки обезличивания из выгрузки (<url>, <digits>…) показываем словами
 const TOKENS = { "<url>": "[ссылка]", "<digits>": "[номер]", "<handle>": "[контакт]", "<email>": "[почта]", "<nick>": "[ник]" };
-const clean = (s) => (s || "").replace(/<(url|digits|handle|email|nick)>/g, (m) => TOKENS[m]);
-const playerText = (t) => clean(t.messages.filter((m) => m.role === "player").map((m) => m.text).join("\n"));
+const clean = (s) => String(s ?? "").replace(/<(url|digits|handle|email|nick)>/g, (m) => TOKENS[m]);
+const playerText = (t) => clean((Array.isArray(t.messages) ? t.messages : []).filter((m) => m.role === "player").map((m) => m.text).join("\n"));
 const priorityRank = (it) => ({ p0: 0, p1: 1, p2: 2, p3: 3 })[it.result.priority] ?? 4;
 const currentView = () => VIEWS.find((v) => v.id === state.view);
+const scoped = () => state.items.filter((it) => state.source === "all" || it.source === state.source);
 
 function visibleItems() {
   const q = state.query.trim().toLowerCase();
-  return state.items
+  return scoped()
     .filter(currentView().test)
     .filter((it) => !q || [it.ticket.ticket_id, it.result.extracted.reported_nick, playerText(it.ticket)]
-      .some((s) => (s || "").toLowerCase().includes(q)))
-    .sort((a, b) => priorityRank(a) - priorityRank(b) || (a.ticket.created_at || "").localeCompare(b.ticket.created_at || ""));
+      .some((s) => String(s ?? "").toLowerCase().includes(q)))
+    .sort((a, b) => priorityRank(a) - priorityRank(b) || String(a.ticket.created_at || "").localeCompare(String(b.ticket.created_at || "")));
 }
 
-function selectedItem() {
-  return state.items.find((it) => it.ticket.ticket_id === state.selected) || null;
-}
+const selectedItem = () => state.items.find((it) => String(it.ticket.ticket_id) === state.selected) || null;
+const sourceName = (id) => (id === "demo" ? "Демо-набор" : id === "form" ? "Добавленные вручную"
+  : `Пачка «${state.batches.find((b) => b.id === id)?.name ?? id}»`);
 
 // ---------- Отрисовка ----------
 function render() {
   renderNav();
-  renderFinding();
-  renderList();
-  renderDetail();
+  const queue = state.mode === "queue";
+  $("panes").hidden = !queue;
+  $("batch-view").hidden = state.mode !== "batch";
+  $("load-view").hidden = state.mode !== "load";
+  const tool = TOOLS.find((t) => t.id === state.mode);
+  $("page-title").textContent = queue ? "Очередь обращений" : tool.title;
+  if (queue) {
+    renderFinding();
+    renderList();
+    renderDetail();
+  } else {
+    $("finding").replaceChildren(h("span", { class: "rest" }, tool.sub));
+    if (state.mode === "batch") renderBatch();
+    else renderLoad();
+  }
 }
 
 function renderNav() {
-  const nav = $("nav");
-  nav.replaceChildren(...VIEWS.map((v) => {
-    const n = state.items.filter(v.test).length;
-    return h("button", {
-      class: "nav-item", "aria-current": state.view === v.id ? "true" : "false",
-      onclick: () => switchView(v.id),
-    }, h("span", {}, v.title), v.count ? h("span", { class: "count" }, n) : null);
-  }));
-  const mode = $("mode");
-  mode.replaceChildren(
+  const items = scoped();
+  $("nav").replaceChildren(...VIEWS.map((v) => h("button", {
+    class: "nav-item", "aria-current": state.mode === "queue" && state.view === v.id ? "true" : "false",
+    onclick: () => switchView(v.id),
+  }, h("span", {}, v.title), v.count ? h("span", { class: "count" }, fmtNum(items.filter(v.test).length)) : null)));
+  $("nav-tools").replaceChildren(...TOOLS.map((t) => h("button", {
+    class: "nav-item", "aria-current": state.mode === t.id ? "true" : "false", onclick: () => switchMode(t.id),
+  }, h("span", {}, t.nav || t.title),
+    t.id === "batch" && state.job && !state.job.finished ? h("span", { class: "count" }, pct(state.job.done, state.job.total)) : null,
+    t.id === "load" && state.load && !state.load.finished ? h("span", { class: "count" }, pct(state.load.done || 0, state.load.total)) : null)));
+  $("mode").replaceChildren(
     state.llm
-      ? h("p", {}, h("strong", {}, "Черновики: шаблоны и LLM"), `${state.llm.provider} · ${state.llm.model}`)
+      ? h("p", {}, h("strong", {}, "Черновики: шаблоны и LLM"), `${state.llm.model}${state.info?.llm?.rpm ? `, до ${state.info.llm.rpm} в минуту` : ""}`)
       : h("p", {}, h("strong", {}, "Черновики: шаблоны"), "LLM не подключена, $0 за обращение"),
     h("p", {}, h("strong", {}, "Решения администраторов"), "сохраняются для дообучения"),
   );
@@ -122,8 +161,9 @@ function renderFinding() {
   const el = $("finding");
   if (state.loading) return el.replaceChildren("Загружаю очередь…");
   if (state.error) return el.replaceChildren("Очередь не загрузилась.");
-  const waiting = state.items.filter(VIEWS[0].test);
-  const ready = state.items.filter(VIEWS[1].test);
+  const items = scoped();
+  const waiting = items.filter(VIEWS[0].test);
+  const ready = items.filter(VIEWS[1].test);
   const urgent = waiting.filter((it) => it.result.priority === "p0");
   const parts = [];
   if (urgent.length) {
@@ -132,14 +172,24 @@ function renderFinding() {
       `${urgent.length} ${plural(urgent.length, "критичное ждёт", "критичных ждут", "критичных ждут")} ответа: ${names.join(", ")}.`), " ");
   }
   if (!waiting.length && !ready.length) parts.push(h("span", { class: "rest" }, "Очередь разобрана: новых обращений нет."));
-  else parts.push(h("span", { class: "rest" }, `Ждут администратора: ${waiting.length}, готовы к отправке: ${ready.length}.`));
+  else parts.push(h("span", { class: "rest" }, `Ждут администратора: ${fmtNum(waiting.length)}, готовы к отправке: ${fmtNum(ready.length)}.`));
   el.replaceChildren(...parts);
+}
+
+function renderSourceSelect() {
+  const sources = ["all", ...new Set(state.items.map((it) => it.source))];
+  if (sources.length <= 2) return null;
+  return h("label", { class: "source" }, h("span", { class: "sr-only" }, "Источник обращений"),
+    h("select", { class: "input select-sm", onchange: (e) => { state.source = e.target.value; reselect(); render(); } },
+      sources.map((s) => h("option", { value: s, selected: s === state.source },
+        s === "all" ? "Все источники" : sourceName(s)))));
 }
 
 function renderList() {
   const list = $("list");
   const view = currentView();
   $("list-title").textContent = view.title;
+  $("list-source").replaceChildren(...[renderSourceSelect()].filter(Boolean));
   if (state.loading) {
     $("list-meta").textContent = "";
     return list.replaceChildren(...Array.from({ length: 6 }, () => h("li", { class: "skeleton", "aria-hidden": "true" }, h("i"), h("i"))));
@@ -147,28 +197,28 @@ function renderList() {
   if (state.error) {
     $("list-meta").textContent = "";
     return list.replaceChildren(h("li", { class: "empty" }, `Не удалось загрузить очередь: ${state.error}. `,
-      h("button", { class: "btn", onclick: load }, "Повторить")));
+      h("button", { class: "btn", onclick: () => loadQueue(true) }, "Повторить")));
   }
   const items = visibleItems();
-  $("list-meta").textContent = `${items.length} ${plural(items.length, "обращение", "обращения", "обращений")} · сначала срочные`;
+  $("list-meta").textContent = `${fmtNum(items.length)} ${plural(items.length, "обращение", "обращения", "обращений")} · сначала срочные`;
   if (!items.length) {
     const q = state.query.trim();
     return list.replaceChildren(h("li", { class: "empty" }, q ? `Ничего не нашлось по запросу «${q}».` : view.empty));
   }
   list.replaceChildren(...items.map((it) => {
-    const r = it.result, t = it.ticket, done = it.status !== "new";
+    const r = it.result, t = it.ticket, done = it.status !== "new", id = String(t.ticket_id);
     let mark = null;
     if (it.status === "sent") mark = h("span", { class: "pill neutral" }, "Отправлено");
     else if (it.status === "escalated") mark = h("span", { class: "pill neutral" }, "Эскалировано");
     else if (r.priority === "p0" || r.priority === "p1") mark = h("span", { class: `pill ${r.priority}` }, PRIORITY[r.priority]);
     else if (r.is_duplicate) mark = h("span", { class: "pill neutral" }, "Повтор");
     return h("li", {}, h("button", {
-      class: `row${done ? " done" : ""}`, "aria-current": it.ticket.ticket_id === state.selected ? "true" : "false",
-      "data-id": t.ticket_id, onclick: () => select(t.ticket_id, true),
+      class: `row${done ? " done" : ""}`, "aria-current": id === state.selected ? "true" : "false",
+      "data-id": id, onclick: () => select(id, true),
     },
       h("span", { class: "row-title" }, CATEGORY[r.category] || r.category),
       h("span", { class: "row-slots" }, h("span", { class: "row-lang" }, (r.language || "").toUpperCase()), mark),
-      h("span", { class: "row-text" }, h("span", { class: "id" }, t.ticket_id), playerText(t) || "—"),
+      h("span", { class: "row-text" }, h("span", { class: "id" }, id), playerText(t) || "—"),
       h("span", { class: "row-time" }, fmtTime(t.created_at)),
     ));
   }));
@@ -180,6 +230,10 @@ function fact(label, value, note) {
     h("dd", {}, empty ? h("span", { class: "dash" }, "—") : value, note ? h("span", { class: "note" }, ` ${note}`) : null));
 }
 
+// Коды категорий в текстах сервиса («report.payment») показываем названиями
+const humanize = (s) => String(s).replace(/(complaint|report)\.[a-z_]+/g, (code) => `«${CATEGORY[code] || code}»`);
+const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+
 function decisionBox(it) {
   const r = it.result;
   if (it.status === "sent") {
@@ -190,17 +244,38 @@ function decisionBox(it) {
     return h("div", { class: "decision done" }, h("h3", {}, "Передано старшей администрации"), h("p", {}, `${fmtTime(it.decided_at)}.`));
   }
   if (r.needs_human) {
-    // Коды категорий в причинах («report.payment») показываем названиями
-    const human = (s) => s.replace(/(complaint|report)\.[a-z_]+/g, (code) => `«${CATEGORY[code] || code}»`);
     return h("div", { class: "decision human" }, h("h3", {}, "Нужен администратор"),
-      h("ul", {}, (r.needs_human_reasons || []).map((s) => h("li", {}, human(s[0].toUpperCase() + s.slice(1))))));
+      h("ul", {}, (r.needs_human_reasons || []).map((s) => h("li", {}, humanize(cap(s))))));
   }
   let why = "Черновик по проверенному шаблону, решения по существу не требуется.";
   if (r.is_spam) why = "Сообщение без содержания: черновик просит описать проблему.";
   else if (r.is_duplicate) why = `Повтор обращения ${r.duplicate_of}: черновик просит дождаться ответа по первому.`;
   else if (r.draft.template === "question_kb") why = "Ответ взят из базы прошлых ответов администраторов на такой же вопрос.";
-  else if (r.draft.template === "llm") why = "Черновик написан LLM и прошёл проверки: цитаты существуют, обещаний нет.";
+  else if (r.draft.template === "llm") why = "Черновик написан LLM по похожему прошлому ответу администратора и прошёл проверки.";
   return h("div", { class: "decision auto" }, h("h3", {}, "Можно ответить без администратора"), h("p", {}, why));
+}
+
+// Шаги разбора одного обращения — словами, из того, что вернул конвейер
+function processSteps(it) {
+  const r = it.result, d = r.draft, m = d.llm;
+  const reason = (prefix) => (r.reasons.find((s) => s.startsWith(prefix)) || "").slice(prefix.length).trim();
+  const how = reason("категория:");
+  const relabel = r.reasons.find((s) => s.startsWith("категория уточнена LLM"));
+  let draftHow = d.template === "llm" ? `LLM ${m?.model ?? ""}, ${fmtMs(m?.latency_ms)}, ${m?.tokens_in ?? "?"} + ${m?.tokens_out ?? "?"} токенов`
+    : d.template === "question_kb" ? `база прошлых ответов админов (${reason("ответ из базы знаний") || "похожий вопрос"})`
+    : `шаблон «${TEMPLATE[d.template] || d.template}»`;
+  if (m && d.template !== "llm") draftHow += ` · LLM не помогла: ${m.error || m.rejected}`;
+  const cites = d.citations.length;
+  return [
+    ["Язык", `${LANG[r.language] || r.language}${it.ticket.server_lang ? `, сервер: ${it.ticket.server_lang}` : ""}`],
+    ["Категория", `${CATEGORY[r.category] || r.category} · ${relabel ? "уточнена LLM" : how || "—"} · уверенность ${Math.round(r.confidence * 100)}%`],
+    ["Приоритет", `${PRIORITY[r.priority]} · ${humanize(reason("приоритет:") || "по категории")}`],
+    ["Спам и повторы", r.is_spam ? "спам: сообщение без содержания" : r.is_duplicate ? `повтор обращения ${r.duplicate_of}` : "нет"],
+    ...(r.suggested_verdict ? [["Вероятный вердикт", `${VERDICT[r.suggested_verdict.label] || r.suggested_verdict.label} · ${Math.round(r.suggested_verdict.p * 100)}%`]] : []),
+    ["Черновик", draftHow],
+    ["Проверка ссылок", cites ? `${cites} ${plural(cites, "пункт", "пункта", "пунктов")} правил, все есть в rules.json; обещаний нет` : "ссылок на правила нет; обещаний нет"],
+    ["Маршрут", r.needs_human ? `к администратору (${(r.needs_human_reasons || []).length} ${plural((r.needs_human_reasons || []).length, "причина", "причины", "причин")})` : "можно отправить без администратора"],
+  ];
 }
 
 function renderDetail() {
@@ -212,27 +287,30 @@ function renderDetail() {
       h("p", { class: "empty" }, state.error ? "Обращение недоступно, пока очередь не загрузится." : "Выберите обращение в списке слева.")));
   }
   const t = it.ticket, r = it.result, x = r.extracted, d = r.draft, open = it.status === "new";
-  const accused = t.messages.filter((m) => m.role === "reported_player");
+  const accused = (Array.isArray(t.messages) ? t.messages : []).filter((m) => m.role === "reported_player");
   const evidence = [];
   if (x.evidence.images_count) evidence.push(`${x.evidence.images_count} ${plural(x.evidence.images_count, "скриншот", "скриншота", "скриншотов")}`);
   if (x.evidence.links) evidence.push(`${x.evidence.links} ${plural(x.evidence.links, "ссылка", "ссылки", "ссылок")}`);
   const source = d.template === "llm" ? "LLM" : d.template === "question_kb" ? "база прошлых ответов" : "шаблон";
   const verdict = r.suggested_verdict;
+  const steps = processSteps(it);
 
   const draft = h("textarea", {
     class: "draft", id: "draft", "aria-label": "Черновик ответа игроку", readonly: !open,
     oninput: () => { state.dirty = true; state.note = "Есть несохранённая правка"; updateStatus(); },
+    onkeydown: (e) => { if (open && (e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); decide("send"); } },
   });
   draft.value = it.final_text || d.text;
 
   pane.replaceChildren(
     h("div", { class: "detail-body" },
       h("button", { class: "btn back", onclick: showList }, "← К очереди"),
-      h("div", { class: "d-meta" }, h("span", { class: "mono" }, t.ticket_id), "·", h("span", {}, KIND[t.kind] || t.kind),
-        "·", h("span", { class: "num" }, fmtTime(t.created_at)), t.region ? ["·", h("span", {}, SERVER[t.region] || t.region)] : null),
+      h("div", { class: "d-meta" }, h("span", { class: "mono" }, String(t.ticket_id)), "·", h("span", {}, KIND[t.kind] || t.kind),
+        "·", h("span", { class: "num" }, fmtTime(t.created_at)), t.region ? ["·", h("span", {}, SERVER[t.region] || t.region)] : null,
+        it.source !== "demo" ? ["·", h("span", {}, sourceName(it.source))] : null),
       h("div", { class: "d-head" }, h("h2", { id: "detail-title", tabindex: "-1" }, CATEGORY[r.category] || r.category),
         h("span", { class: `pill ${r.priority === "p0" || r.priority === "p1" ? r.priority : "neutral"}` }, PRIORITY[r.priority]),
-        h("span", { class: "meta d-lang" }, LANG[r.language] || r.language)),
+        h("span", { class: "d-lang" }, LANG[r.language] || r.language)),
       decisionBox(it),
       h("section", { class: "block" },
         h("div", { class: "block-head" }, h("h3", {}, "Сообщение игрока"), h("span", { class: "meta" }, "слова игрока, не проверены")),
@@ -251,12 +329,16 @@ function renderDetail() {
       h("section", { class: "block" },
         h("div", { class: "block-head" }, h("h3", {}, "Черновик ответа"),
           h("span", { class: "meta" }, `${source} · ${LANG[d.language] || d.language}`),
-          open ? h("span", { class: "meta" }, "можно править перед отправкой") : null),
+          open ? h("span", { class: "meta" }, "Ctrl+Enter — отправить") : null),
         draft,
         d.citations.length
           ? h("ul", { class: "cites", "aria-label": "Основания из правил" }, d.citations.map((c) => h("li", { class: "cite" },
               h("span", { class: "code" }, c.ref), h("span", { class: "section" }, c.section), h("q", {}, c.quote))))
           : h("p", { class: "no-cites" }, "Без ссылок на правила: в этой ситуации они не нужны.")),
+      h("details", { class: "block process" },
+        h("summary", {}, h("span", { class: "summary-title" }, "Как обработано"),
+          h("span", { class: "meta" }, it.processing_ms != null ? `${steps.length} шагов за ${fmtMs(it.processing_ms)}` : `${steps.length} шагов`)),
+        h("dl", { class: "steps" }, steps.map(([k, v]) => h("div", { class: "step" }, h("dt", {}, k), h("dd", {}, v))))),
     ),
     h("div", { class: "actions" },
       h("button", { class: "btn primary", disabled: !open, onclick: () => decide("send") }, "Отправить игроку"),
@@ -276,14 +358,269 @@ function updateStatus() {
   else el.textContent = state.note || (it && it.final_text ? "Черновик изменён администратором" : "");
 }
 
-// ---------- Действия ----------
+// ---------- Загрузка обращений ----------
+function kpi(label, value, sub) {
+  return h("div", { class: "kpi" }, h("dt", {}, label), h("dd", {}, h("span", { class: "kpi-value num" }, value), sub ? h("small", {}, sub) : null));
+}
+
+function barList(rows, total, label) {
+  const max = Math.max(1, ...rows.map(([, n]) => n));
+  return h("ul", { class: "bars" }, rows.map(([key, n]) => h("li", {},
+    h("span", { class: "bar-label" }, label(key)),
+    h("span", { class: "bar-value num" }, `${fmtNum(n)} · ${pct(n, total)}`),
+    h("span", { class: "bar-track", "aria-hidden": "true" }, h("span", { class: "bar-fill", style: `width:${(n / max) * 100}%` })))));
+}
+
+function renderBatch() {
+  const box = $("batch-view");
+  const j = state.job;
+  const running = j && !j.finished;
+  const file = h("input", { type: "file", accept: ".jsonl,.json", id: "batch-file", class: "sr-only", disabled: running, onchange: onBatchFile });
+  const upload = h("section", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, "Новая пачка")),
+    h("p", { class: "muted" }, "Файл в формате выгрузки кейса: .jsonl, одно обращение в строке, или .json с массивом. До 5000 обращений за раз."),
+    h("div", { class: "row-actions" },
+      h("label", { class: `btn primary${running ? " is-disabled" : ""}`, for: "batch-file" }, "Выбрать файл"), file,
+      state.info?.validation_available
+        ? h("button", { class: "btn", disabled: running, onclick: () => startBatch("/api/batches/sample", { n: 500 }) }, "500 обращений из валидации")
+        : null),
+    state.jobError ? h("p", { class: "error-text", role: "alert" }, state.jobError) : null);
+  const blocks = [upload];
+  if (j) blocks.push(batchSummary(j));
+  const others = state.batches.filter((b) => !j || b.id !== j.id);
+  if (others.length) {
+    blocks.push(h("section", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Прошлые пачки")),
+      h("ul", { class: "plain-list" }, others.map((b) => h("li", {},
+        h("button", { class: "link", onclick: () => { pollJob(b.id); } }, b.name), h("span", { class: "muted" }, ` · ${fmtNum(b.total)} обращений`))))));
+  }
+  box.replaceChildren(...blocks);
+}
+
+function batchSummary(j) {
+  const total = j.done || 1;
+  const progress = j.total ? Math.round((j.done / j.total) * 100) : 0;
+  const prio = ["p0", "p1", "p2", "p3"];
+  const llm = j.llm || {};
+  return h("section", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, `Пачка «${j.name}»`),
+      h("span", { class: "meta" }, j.finished ? `разобрана за ${fmtSec(j.elapsed_s)}` : `идёт разбор · ${fmtSec(j.elapsed_s)}`)),
+    h("div", { class: "progress", role: "progressbar", "aria-label": "Разобрано", "aria-valuenow": progress, "aria-valuemin": "0", "aria-valuemax": "100" },
+      h("span", { style: `width:${progress}%` })),
+    j.error ? h("p", { class: "error-text", role: "alert" }, `Разбор остановился: ${j.error}`) : null,
+    h("dl", { class: "kpis" },
+      kpi("Разобрано", `${fmtNum(j.done)} из ${fmtNum(j.total)}`),
+      kpi("Скорость", `${fmtNum(j.per_second)}`, "в секунду"),
+      kpi("Время на обращение", fmtMs(j.p95_ms), "p95"),
+      kpi("Самое долгое", fmtMs(j.max_ms))),
+    h("div", { class: "split" },
+      h("div", {},
+        h("h3", {}, "Куда ушли"),
+        h("ul", { class: "bars" },
+          [["Нужен администратор", j.needs_human], ["Можно ответить сразу", j.auto], ["Спам", j.spam], ["Повторы", j.duplicates]].map(([k, n]) =>
+            h("li", {}, h("span", { class: "bar-label" }, k), h("span", { class: "bar-value num" }, `${fmtNum(n)} · ${pct(n, total)}`),
+              h("span", { class: "bar-track", "aria-hidden": "true" }, h("span", { class: "bar-fill", style: `width:${(n / total) * 100}%` }))))),
+        h("h3", {}, "Приоритет"),
+        h("dl", { class: "prio-strip" }, prio.map((p) => h("div", {}, h("dt", {}, PRIORITY[p]), h("dd", { class: "num" }, fmtNum(j.priorities?.[p] || 0))))),
+        h("h3", {}, "Языки"),
+        h("p", { class: "langs" }, (j.languages || []).map(([l, n]) => `${LANG[l] || l} ${fmtNum(n)}`).join(" · ") || "—"),
+        llm.calls ? [h("h3", {}, "LLM"), h("p", { class: "muted" },
+          `${fmtNum(llm.calls)} ${plural(llm.calls, "вызов", "вызова", "вызовов")}: приняты ${fmtNum(llm.accepted || 0)}` +
+          `${llm.limited ? `, лимит в минуту ${fmtNum(llm.limited)}` : ""}${llm.failed ? `, ошибки и отказы проверок ${fmtNum(llm.failed)}` : ""}.` +
+          `${llm.limited ? " Сверх лимита ставится шаблон, обращение уходит администратору." : ""}`)] : null),
+      h("div", {}, h("h3", {}, "Категории"), barList(j.categories || [], total, (c) => CATEGORY[c] || c))),
+    j.finished && j.done ? h("div", { class: "row-actions" },
+      h("button", { class: "btn primary", onclick: () => openBatch(j.id) }, "Открыть в очереди")) : null);
+}
+
+async function onBatchFile(e) {
+  const f = e.target.files?.[0];
+  e.target.value = "";
+  if (!f) return;
+  let tickets;
+  try {
+    const text = (await f.text()).trim();
+    tickets = text.startsWith("[") ? JSON.parse(text) : text.split(/\r?\n/).filter((l) => l.trim()).map((l) => JSON.parse(l));
+    if (!Array.isArray(tickets) || !tickets.length) throw new Error("в файле нет обращений");
+  } catch (err) {
+    state.jobError = `Файл не прочитан: ${err.message}. Нужен .jsonl (обращение в строке) или .json (массив).`;
+    return render();
+  }
+  startBatch("/api/batches", { name: f.name, tickets });
+}
+
+async function startBatch(url, body) {
+  state.jobError = "";
+  try {
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    state.job = data;
+    state.batches = [...state.batches.filter((b) => b.id !== data.id), { id: data.id, name: data.name, total: data.total }];
+    pollJob(data.id);
+  } catch (err) {
+    state.jobError = `Не удалось запустить разбор: ${err.message}`;
+  }
+  render();
+}
+
+function pollJob(id) {
+  clearInterval(timers.job);
+  const tick = async () => {
+    try {
+      const res = await fetch(`/api/jobs/${id}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      state.job = await res.json();
+    } catch (err) {
+      state.jobError = `Нет связи с сервисом: ${err.message}`;
+      clearInterval(timers.job);
+    }
+    if (state.job?.finished) {
+      clearInterval(timers.job);
+      await loadQueue(false);
+    }
+    if (state.mode === "batch") renderBatch();
+    renderNav();
+  };
+  tick();
+  timers.job = setInterval(tick, 400);
+}
+
+function openBatch(id) {
+  state.mode = "queue";
+  state.source = id;
+  state.view = "all";
+  reselect();
+  render();
+}
+
+// ---------- Проверка нагрузки ----------
+function segmented(label, values, current, onPick, fmt = (v) => v) {
+  return h("div", { class: "field" }, h("span", { class: "field-label" }, label),
+    h("div", { class: "segmented", role: "group", "aria-label": label }, values.map((v) => h("button", {
+      type: "button", "aria-pressed": v === current ? "true" : "false", onclick: () => onPick(v),
+    }, fmt(v)))));
+}
+
+function renderLoad() {
+  const box = $("load-view");
+  const lt = state.load;
+  const running = lt && !lt.finished;
+  const sources = [["demo", "Демо-набор, по кругу"], ...state.batches.map((b) => [b.id, `Пачка «${b.name}», по кругу`])];
+  const controls = h("section", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, "Параметры")),
+    h("div", { class: "controls" },
+      segmented("Сколько запросов", [100, 500, 1000], state.loadN, (v) => { state.loadN = v; renderLoad(); }, fmtNum),
+      segmented("Одновременно", [1, 10, 50], state.loadC, (v) => { state.loadC = v; renderLoad(); }),
+      h("div", { class: "field" }, h("label", { class: "field-label", for: "load-source" }, "Какие обращения"),
+        h("select", { id: "load-source", class: "input", onchange: (e) => { state.loadSource = e.target.value; } },
+          sources.map(([v, l]) => h("option", { value: v, selected: v === state.loadSource }, l))))),
+    h("div", { class: "row-actions" },
+      h("button", { class: "btn primary", disabled: running, onclick: startLoad }, running ? "Идёт проверка…" : "Запустить проверку"),
+      h("span", { class: "muted" }, "Лимит кейса: p95 не больше 5 секунд.")),
+    state.loadError ? h("p", { class: "error-text", role: "alert" }, state.loadError) : null);
+  box.replaceChildren(controls, lt ? loadResults(lt) : null);
+}
+
+function loadResults(lt) {
+  const done = lt.done || 0;
+  const progress = lt.total ? Math.round((done / lt.total) * 100) : 0;
+  const p95 = lt.p95_ms;
+  const verdict = lt.finished && p95 != null
+    ? (p95 <= 5000 ? `p95 ${fmtMs(p95)} — в ${Math.max(1, Math.floor(5000 / Math.max(p95, 1)))} раз ниже лимита в 5 с.` : `p95 ${fmtMs(p95)} — выше лимита в 5 с.`)
+    : null;
+  const hist = lt.hist || [];
+  const edges = lt.buckets_ms || [];
+  const maxBin = Math.max(1, ...hist);
+  const llm = lt.llm || {};
+  return h("section", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, `${fmtNum(lt.total)} запросов, по ${lt.concurrency} одновременно`),
+      h("span", { class: "meta" }, lt.failed ? "остановилась с ошибкой" : lt.finished ? `готово за ${fmtSec(lt.elapsed_s || 0)}` : `идёт · ${fmtSec(lt.elapsed_s || 0)}`)),
+    h("div", { class: "progress", role: "progressbar", "aria-label": "Отправлено", "aria-valuenow": progress, "aria-valuemin": "0", "aria-valuemax": "100" },
+      h("span", { style: `width:${progress}%` })),
+    lt.failed ? h("p", { class: "error-text", role: "alert" }, lt.message || "Проверка остановилась.") : null,
+    verdict ? h("p", { class: `verdict-line ${p95 <= 5000 ? "ok" : "bad"}` }, verdict) : null,
+    h("dl", { class: "kpis", style: "--cols:6" },
+      kpi("Обработано", `${fmtNum(done)} из ${fmtNum(lt.total)}`),
+      kpi("Ошибок", fmtNum(lt.errors || 0)),
+      kpi("Задержка p50", fmtMs(lt.p50_ms)),
+      kpi("Задержка p95", fmtMs(p95)),
+      kpi("Самая долгая", fmtMs(lt.max_ms)),
+      kpi("Запросов в секунду", fmtNum(lt.rps || 0))),
+    h("h3", {}, "Распределение задержки"),
+    h("div", { class: "hist", role: "img", "aria-label": "Сколько запросов уложилось в каждый интервал задержки" },
+      hist.map((n, i) => h("div", { class: "hist-col" },
+        h("span", { class: "hist-count num" }, n ? fmtNum(n) : ""),
+        h("span", { class: "hist-bar", style: `height:${Math.round((n / maxBin) * 120)}px` }),
+        h("span", { class: "hist-label" }, i < edges.length ? `до ${fmtMs(edges[i])}` : `больше ${fmtMs(edges[edges.length - 1])}`)))),
+    llm.calls ? h("p", { class: "muted" },
+      `LLM: ${fmtNum(llm.calls)} ${plural(llm.calls, "вызов", "вызова", "вызовов")}, приняты ${fmtNum(llm.accepted || 0)}` +
+      `${llm.limited ? `, сверх лимита в минуту ${fmtNum(llm.limited)} (шаблон вместо LLM, ответ не задерживается)` : ""}` +
+      `${llm.failed ? `, ошибки ${fmtNum(llm.failed)}` : ""}.`) : null,
+    (lt.slowest || []).length ? [
+      h("h3", {}, "Самые долгие запросы"),
+      h("ul", { class: "slow-list" }, lt.slowest.map((s) => h("li", {},
+        h("span", { class: "num slow-ms" }, fmtMs(s.ms)),
+        h("span", { class: "mono" }, s.ticket),
+        h("span", { class: "muted" }, !s.ok ? "ошибка запроса"
+          : s.llm ? `разбор на сервере ${fmtMs(s.server_ms)}: ${/^LLM/.test(s.llm) ? `вызов ${s.llm}` : `LLM — ${s.llm}`}`
+          : `разбор на сервере ${fmtMs(s.server_ms)}, остальное — ожидание в очереди запросов`)))),
+    ] : null);
+}
+
+async function startLoad() {
+  state.loadError = "";
+  try {
+    const res = await fetch("/api/loadtests", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ n: state.loadN, concurrency: state.loadC, source: state.loadSource }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    state.load = { ...data, done: 0, finished: false };
+    clearInterval(timers.load);
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/loadtests/${data.id}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        state.load = { ...state.load, ...(await r.json()) };
+      } catch (err) {
+        state.loadError = `Нет связи с сервисом: ${err.message}`;
+        clearInterval(timers.load);
+      }
+      if (state.load.finished) clearInterval(timers.load);
+      if (state.mode === "load") renderLoad();
+      renderNav();
+    };
+    timers.load = setInterval(tick, 300);
+  } catch (err) {
+    state.loadError = `Не удалось запустить проверку: ${err.message}`;
+  }
+  renderLoad();
+}
+
+// ---------- Действия в очереди ----------
+function reselect() {
+  const items = visibleItems();
+  if (!items.some((it) => String(it.ticket.ticket_id) === state.selected)) state.selected = items[0] ? String(items[0].ticket.ticket_id) : null;
+}
+
 function switchView(id) {
+  state.mode = "queue";
   state.view = id;
+  closeMenu();
+  reselect();
+  render();
+}
+
+function switchMode(mode) {
+  state.mode = mode;
+  closeMenu();
+  render();
+}
+
+function closeMenu() {
   $("sidebar").classList.remove("open");
   $("menu-btn").setAttribute("aria-expanded", "false");
-  const items = visibleItems();
-  if (!items.some((it) => it.ticket.ticket_id === state.selected)) select(items[0]?.ticket.ticket_id ?? null, false);
-  render();
 }
 
 function select(id, user) {
@@ -308,7 +645,7 @@ function showList() {
 async function decide(action) {
   const it = selectedItem();
   if (!it) return;
-  const before = visibleItems().map((x) => x.ticket.ticket_id);
+  const before = visibleItems().map((x) => String(x.ticket.ticket_id));
   const text = $("draft").value;
   try {
     const res = await fetch(`/api/tickets/${encodeURIComponent(it.ticket.ticket_id)}/decision`, {
@@ -316,9 +653,9 @@ async function decide(action) {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const updated = await res.json();
-    state.items = state.items.map((x) => (x.ticket.ticket_id === updated.ticket.ticket_id ? updated : x));
+    const id = String(updated.ticket.ticket_id);
+    state.items = state.items.map((x) => (String(x.ticket.ticket_id) === id ? updated : x));
     state.dirty = false;
-    const id = updated.ticket.ticket_id;
     if (action === "save") {
       state.note = `Правка сохранена ${fmtTime(updated.decided_at)}`;
       render();
@@ -326,9 +663,8 @@ async function decide(action) {
     }
     $("flash").textContent = `${id}: ${action === "send" ? "ответ отправлен" : "передано старшей администрации"} в ${fmtTime(updated.decided_at)}`;
     // Следующее обращение того же раздела — чтобы разбирать очередь подряд
-    const after = visibleItems().map((x) => x.ticket.ticket_id);
-    const next = after.includes(id) ? id : before.slice(before.indexOf(id) + 1).find((x) => after.includes(x)) ?? after[after.length - 1] ?? null;
-    state.selected = next;
+    const after = visibleItems().map((x) => String(x.ticket.ticket_id));
+    state.selected = after.includes(id) ? id : before.slice(before.indexOf(id) + 1).find((x) => after.includes(x)) ?? after[after.length - 1] ?? null;
     state.note = "";
     render();
   } catch (e) {
@@ -337,18 +673,22 @@ async function decide(action) {
   }
 }
 
-async function load() {
-  state.loading = true;
-  state.error = null;
-  render();
+async function loadQueue(initial) {
+  if (initial) {
+    state.loading = true;
+    state.error = null;
+    render();
+  }
   try {
     const res = await fetch("/api/queue");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     state.items = data.items;
     state.llm = data.llm;
+    state.batches = data.batches || [];
     state.loading = false;
-    state.selected = visibleItems()[0]?.ticket.ticket_id ?? null;
+    if (initial) state.selected = visibleItems()[0] ? String(visibleItems()[0].ticket.ticket_id) : null;
+    else reselect();
   } catch (e) {
     state.loading = false;
     state.error = e.message;
@@ -386,10 +726,12 @@ function setupDialog() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const item = await res.json();
       state.items.push(item);
+      state.mode = "queue";
+      state.source = "all";
       state.view = item.result.needs_human ? "waiting" : "ready";
       dialog.close();
-      $("flash").textContent = `${item.ticket.ticket_id}: обращение разобрано`;
-      select(item.ticket.ticket_id, true);
+      $("flash").textContent = `${item.ticket.ticket_id}: обращение разобрано за ${fmtMs(item.processing_ms)}`;
+      select(String(item.ticket.ticket_id), true);
     } catch (err) {
       alert(`Не удалось разобрать обращение: ${err.message}`);
     } finally {
@@ -401,8 +743,8 @@ function setupDialog() {
 // ---------- Запуск ----------
 $("search").addEventListener("input", (e) => {
   state.query = e.target.value;
-  const items = visibleItems();
-  if (!items.some((it) => it.ticket.ticket_id === state.selected)) state.selected = items[0]?.ticket.ticket_id ?? null;
+  if (state.mode !== "queue") state.mode = "queue";
+  reselect();
   render();
 });
 $("menu-btn").addEventListener("click", () => {
@@ -411,7 +753,7 @@ $("menu-btn").addEventListener("click", () => {
 });
 $("list").addEventListener("keydown", (e) => {
   if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-  const ids = visibleItems().map((it) => it.ticket.ticket_id);
+  const ids = visibleItems().map((it) => String(it.ticket.ticket_id));
   const i = ids.indexOf(state.selected);
   const next = ids[Math.min(ids.length - 1, Math.max(0, i + (e.key === "ArrowDown" ? 1 : -1)))];
   if (!next || next === state.selected) return;
@@ -423,4 +765,5 @@ $("list").addEventListener("keydown", (e) => {
   document.querySelector(`.row[data-id="${CSS.escape(next)}"]`)?.focus();
 });
 setupDialog();
-load();
+fetch("/api/info").then((r) => r.json()).then((info) => { state.info = info; render(); }).catch(() => {});
+loadQueue(true);
