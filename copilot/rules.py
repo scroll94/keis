@@ -95,8 +95,16 @@ def validate_citations(citations: list[dict]) -> list[dict]:
 
 
 def short_ref(code: str) -> str:
-    """Ссылка в виде контракта и taxonomy.json: общие правила — просто номер («2.1»), остальные — с кодом («ЖБ 1.2.2», «GZ 1.1»)."""
-    return code[3:] if code.startswith("ОП ") else code
+    """Ссылка как в контракте и taxonomy.json: общие правила — номер («2.1»), ЖБ и GZ — с кодом.
+
+    У остальных разделов официальных сокращений нет, поэтому они пишутся полным названием.
+    """
+    if code.startswith("ОП "):
+        return code[3:]
+    if code.startswith(("ЖБ ", "GZ ")):
+        return code
+    p = load_points().get(code)
+    return f"{p.section_title} {p.ref}" if p else code
 
 
 def cite(code: str) -> dict | None:

@@ -337,6 +337,44 @@ class BulkReplyTest(unittest.TestCase):
         self.assertTrue(all(c["ref"] in known and not PROMISE.search(r["text"]) for r in replies for c in r["citations"]))
 
 
+class StreamAnswersTest(unittest.TestCase):
+    """Уточнения экспертов Grand Mobile на стриме."""
+
+    def test_server_is_region(self):
+        r = Triage(use_llm=False)(ticket("помогите застрял", ticket_id="reg", region="kz"))
+        self.assertEqual(r["extracted"]["server"], "kz")
+
+    def test_obscene_message_is_not_spam(self):
+        tri = Triage(use_llm=False)
+        self.assertFalse(tri(ticket("сука админ", ticket_id="ob1", reporter="ob1"))["is_spam"])
+        self.assertFalse(tri(ticket("помогите", ticket_id="ob2", reporter="ob2"))["is_spam"])
+        self.assertTrue(tri(ticket("ау", ticket_id="ob3", reporter="ob3"))["is_spam"])
+
+    def test_sections_without_official_code_use_full_name(self):
+        code = next(c for c in rules.load_points() if c.startswith("ОПГ "))
+        self.assertEqual(rules.short_ref(code), f"Правила для ОПГ {code.split()[1]}")
+
+    def test_llm_sees_accused_comment(self):
+        llm = object.__new__(LLM)
+        llm.provider, llm.model, llm.price_in, llm.price_out = "fake", "fake", 0.0, 0.0
+        llm.rpm, llm.max_wait, llm._calls, llm._lock = 0, 0.0, deque(), Lock()
+        seen = {}
+
+        def call(user):
+            seen["prompt"] = user
+            out = {"reply": "Обращение передано администратору.", "citations": ["2.1"], "category": "complaint.insult",
+                   "needs_human": True, "reason": ""}
+            return json.dumps(out, ensure_ascii=False), 1, 1
+
+        llm._call = call
+        t = ticket("оск родни", kind="complaint")
+        t["messages"].append({"role": "reported_player", "text": "это была игра по роли"})
+        base = {"text": drafts.render("complaint_review", "ru", []), "language": "ru", "citations": [], "template": "complaint_review"}
+        d = llm.improve(t, "оск родни", "complaint.insult", "ru", base)
+        self.assertIn("это была игра по роли", seen["prompt"])
+        self.assertEqual([c["ref"] for c in d["citations"]], ["ОП 2.1"])
+
+
 class ContractTest(unittest.TestCase):
     """Ответ POST /triage по контракту из документа кейса."""
 

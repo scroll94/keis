@@ -159,8 +159,9 @@ class LLM:
     def improve(self, t: dict, text: str, category: str, lang: str, draft: dict) -> dict | None:
         kind = t.get("kind", "report")
         points = search_rules(text, category)
-        allowed = {p.code: p for p in points}
-        rules_block = "\n".join(f"{p.code}: {p.quote(300)}" for p in points) or "(нет)"
+        allowed = {p.code: p for p in points} | {rules.short_ref(p.code): p for p in points}
+        rules_block = "\n".join(f"{rules.short_ref(p.code)}: {p.quote(300)}" for p in points) or "(нет)"
+        accused = "\n".join(str(m.get("text") or "") for m in t.get("messages", []) if m.get("role") == "reported_player")
         kb = KnowledgeBase.get()
         past = kb.search(text, min_sim=KB_CONTEXT_MIN) if kb and kind == "report" else []
         past_block = "\n".join(f"Вопрос: {q}\nОтвет: {a}" for q, a, _ in past) or "(нет)"
@@ -171,6 +172,7 @@ class LLM:
             f"ПУНКТЫ ПРАВИЛ:\n{rules_block}\n\n"
             f"ПРОШЛЫЕ ОТВЕТЫ АДМИНИСТРАТОРОВ:\n{past_block}\n\n"
             f"ОБРАЩЕНИЕ ИГРОКА:\n{text[:1500]}"
+            + (f"\n\nКОММЕНТАРИЙ ОБВИНЯЕМОГО (его утверждение, не факт):\n{accused[:800]}" if accused else "")
         )
         # Сходство с ближайшим прошлым вопросом: по нему решается, можно ли отправить ответ без админа
         meta = {"provider": self.provider, "model": self.model, "kb_sim": round(max((s for _, _, s in past), default=0.0), 2)}
@@ -224,8 +226,8 @@ class LLM:
         out["reply"] = reply
         if not reply or len(reply) > 1200:
             return "пустой или слишком длинный ответ", {}
-        out["citations"] = [c for c in out.get("citations") or [] if c in allowed]
-        cited_nums = {allowed[c].ref for c in out["citations"]}
+        out["citations"] = [allowed[c].code for c in out.get("citations") or [] if c in allowed]
+        cited_nums = {c.rsplit(" ", 1)[-1] for c in out["citations"]}
         for num in REF_LIKE.findall(reply):
             if num not in cited_nums:
                 return f"упоминание пункта {num} вне цитат", {}

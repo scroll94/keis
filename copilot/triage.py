@@ -28,7 +28,6 @@ HOUSE_HINT = re.compile(r"\bдом\b|у дома|квартир|у входа", 
 RMT_HINT = re.compile(r"реал|руб|тг|телеграм|продае|продаё|купи", re.I)
 RACISM_HINT = re.compile(r"расизм|наци|национал|рели|кавказ|чурк|хач|негр", re.I)
 THREAT_HINT = re.compile(r"угрож|деанон|адрес|найду|вычислю|докс", re.I)
-OBSCENE = re.compile(r"\b(пид[оа]р|еба|ёба|хуй|хуе|бля|сука|нахуй)\w*", re.I)
 
 NEEDS_HUMAN_ALWAYS = {"report.account", "report.payment", "complaint.admin"}
 
@@ -221,7 +220,8 @@ class Triage:
             "rule_refs_raw": t.get("rule_refs_raw"),
             "has_evidence": has_evidence,
             "evidence": {"images_count": images, "links": links},
-            "server": (srv.group(1) or srv.group(2)) if srv else None,
+            # В контракте server — регион (ответ экспертов); номер из текста — запасной вариант
+            "server": t.get("region") or ((srv.group(1) or srv.group(2)) if srv else None),
             "region": t.get("region"),
         }
 
@@ -243,11 +243,10 @@ class Triage:
         reasons.append(f"приоритет: {pwhy}")
 
         # --- спам и дубли ---
-        is_spam = (kind == "report" and cat == "report.offtopic" and len(body) <= 3) or (
-            bool(OBSCENE.search(body)) and len(body) < 40 and cat in ("report.offtopic", "report.question", "complaint.invalid")
-        )
+        # Спам — пустые сообщения и флуд; мат в адрес админа и «помогите» спамом не считаются
+        is_spam = kind == "report" and cat == "report.offtopic" and len(body) <= 3
         if is_spam:
-            reasons.append("спам: пустое или оскорбительное сообщение без содержания")
+            reasons.append("спам: пустое сообщение без содержания")
         ts = _parse_ts(t.get("created_at"))
         rep = t.get("reporter_hash") or "anon"
         if kind == "complaint":
