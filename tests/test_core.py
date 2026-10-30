@@ -1,8 +1,15 @@
 """Проверки ключевых гарантий сервиса. Запуск: python -m unittest discover tests"""
 import json
+import os
 import sys
 import unittest
+from collections import deque
+
+os.environ["LLM_PROVIDER"] = "none"  # тесты не ходят в сеть и не тратят квоту, даже если в .env есть ключ
 from pathlib import Path
+from threading import Lock
+
+import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from copilot import drafts, rules  # noqa: E402
@@ -143,6 +150,7 @@ class LLMGuardTest(unittest.TestCase):
     def setUp(self):
         self.llm = object.__new__(LLM)
         self.llm.provider, self.llm.model, self.llm.price_in, self.llm.price_out = "fake", "fake", 0.1, 0.5
+        self.llm.rpm, self.llm.max_wait, self.llm._calls, self.llm._lock = 0, 0.0, deque(), Lock()
         self.base = {"text": drafts.render("question", "ru", []), "language": "ru", "citations": [], "template": "question"}
 
     def answer(self, reply, citations=()):
@@ -163,6 +171,20 @@ class LLMGuardTest(unittest.TestCase):
 
     def test_rejects_wrong_language(self):
         self.assertEqual(self.answer("You can get it at the Government.")["template"], "question")
+
+    def test_rate_limit_falls_back_without_waiting(self):
+        self.llm.rpm = 2  # квота: два вызова в минуту, ждать нельзя (как в HTTP-сервисе)
+        results = [self.answer("Лицензию выдают в Правительстве.") for _ in range(3)]
+        self.assertEqual([r["template"] for r in results], ["llm", "llm", "question"])
+        self.assertEqual(results[2]["llm"]["error"], "лимит запросов в минуту")
+
+    def test_provider_429_is_reported(self):
+        def over_quota(user):
+            raise httpx.HTTPStatusError("429", request=httpx.Request("POST", "http://llm"), response=httpx.Response(429))
+        self.llm._call = over_quota
+        d = self.llm.improve(ticket("вопрос"), "вопрос", "report.question", "ru", self.base)
+        self.assertEqual(d["template"], "question")
+        self.assertEqual(d["llm"]["error"], "HTTP 429")
 
     def test_timeout_falls_back(self):
         def boom(user):

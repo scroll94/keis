@@ -32,11 +32,15 @@ def main():
         tickets = tickets[: args.limit]
     order = sorted(range(len(tickets)), key=lambda i: tickets[i].get("created_at") or "")
     tri = Triage(use_model=not args.no_model, use_llm=not args.no_llm)
-    preds, lat = [None] * len(tickets), []
+    if tri.llm:
+        tri.llm.max_wait = max(tri.llm.max_wait, 120)  # оценка, как и пакетный прогон, ждёт квоту провайдера
+    preds, lat, waited = [None] * len(tickets), [], 0.0
     for i in order:
         t0 = time.perf_counter()
         preds[i] = tri(tickets[i])
-        lat.append(time.perf_counter() - t0)
+        wait = (preds[i]["draft"].get("llm") or {}).get("wait_ms", 0) / 1000
+        waited += wait
+        lat.append(time.perf_counter() - t0 - wait)  # задержка обработки без ожидания квоты
 
     n = len(tickets)
     lines = [f"# Метрики на валидации ({n} тикетов)", ""]
@@ -86,11 +90,16 @@ def main():
     # Стоимость и задержка
     llm_calls = [p["draft"]["llm"] for p in preds if p["draft"].get("llm")]
     cost = sum(m.get("cost_usd", 0) for m in llm_calls)
+    ok = sorted(m["latency_ms"] for m in llm_calls if "tokens_in" in m)
     lat.sort()
     lines += [
         "## Стоимость и задержка",
         f"- вызовов LLM: {len(llm_calls)} ({len(llm_calls) / n:.1%} тикетов), отклонено проверками: "
         f"{sum('rejected' in m for m in llm_calls)}, ошибок: {sum('error' in m for m in llm_calls)}",
+        *([f"- ответ LLM: p50 {ok[len(ok) // 2]} мс, p95 {ok[max(0, int(len(ok) * 0.95) - 1)]} мс; "
+           f"токенов в среднем {sum(m['tokens_in'] for m in llm_calls if 'tokens_in' in m) // len(ok)} на вход, "
+           f"{sum(m['tokens_out'] for m in llm_calls if 'tokens_in' in m) // len(ok)} на выход"] if ok else []),
+        *([f"- ожидание квоты провайдера (LLM_RPM): {waited:.0f} с за прогон, в задержку не входит"] if waited else []),
         f"- стоимость: всего ${cost:.4f}, в среднем **${cost / n:.6f}** за тикет (лимит $0.002)",
         f"- задержка: p50 {statistics.median(lat) * 1000:.1f} мс, p95 **{lat[int(n * 0.95) - 1] * 1000:.1f} мс** (лимит 5000 мс)",
         "",

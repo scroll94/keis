@@ -6,6 +6,9 @@ LLM_PROVIDER=openai_compat  DeepSeek / Gemini / Ollama / OpenAI через их 
                             LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
 LLM_PRICE_IN, LLM_PRICE_OUT цена в $ за 1М входных / выходных токенов (для расчёта стоимости тикета)
 LLM_TIMEOUT                 таймаут вызова в секундах (по умолчанию 4): при превышении — шаблон
+LLM_RPM                     сколько вызовов в минуту разрешает тариф (бесплатный Gemini — 15); 0 — без ограничения
+LLM_MAX_WAIT                сколько секунд можно ждать свободный слот (по умолчанию 0: HTTP-сервис не ждёт,
+                            сразу ставит шаблон). Пакетный прогон (scripts/predict.py) ждёт сам.
 
 Любой ответ модели проходит проверки: цитаты только из выданного списка пунктов, никаких
 упоминаний других пунктов, никаких обещаний разбана/возврата/наказания, язык совпадает с языком
@@ -15,6 +18,8 @@ import json
 import os
 import re
 import time
+from collections import deque
+from threading import Lock
 
 import httpx
 
@@ -76,8 +81,12 @@ class LLM:
         self.provider = os.environ.get("LLM_PROVIDER", "none").strip().lower()
         self.model = os.environ.get("LLM_MODEL", "").strip()
         self.timeout = float(os.environ.get("LLM_TIMEOUT", "4"))
-        self.price_in = float(os.environ.get("LLM_PRICE_IN", "0"))
-        self.price_out = float(os.environ.get("LLM_PRICE_OUT", "0"))
+        self.price_in = float(os.environ.get("LLM_PRICE_IN") or 0)
+        self.price_out = float(os.environ.get("LLM_PRICE_OUT") or 0)
+        self.rpm = int(os.environ.get("LLM_RPM") or 0)
+        self.max_wait = float(os.environ.get("LLM_MAX_WAIT") or 0)
+        self._calls: deque[float] = deque()  # время вызовов за последнюю минуту
+        self._lock = Lock()
         if not self.model:
             raise ValueError("LLM_MODEL не задан в .env")
         if self.provider == "anthropic":
@@ -92,6 +101,25 @@ class LLM:
             )
         else:
             raise ValueError(f"неизвестный LLM_PROVIDER: {self.provider}")
+
+    def _acquire(self) -> float | None:
+        """Слот в пределах LLM_RPM. Возвращает, сколько секунд пришлось ждать, или None, если ждать дольше max_wait."""
+        if not self.rpm:
+            return 0.0
+        with self._lock:
+            waited = 0.0
+            while True:
+                now = time.monotonic()
+                while self._calls and now - self._calls[0] >= 60:
+                    self._calls.popleft()
+                if len(self._calls) < self.rpm:
+                    self._calls.append(now)
+                    return waited
+                wait = 60 - (now - self._calls[0]) + 0.05
+                if waited + wait > self.max_wait:
+                    return None
+                time.sleep(wait)
+                waited += wait
 
     @classmethod
     def from_env(cls):
@@ -144,14 +172,27 @@ class LLM:
             f"ПРОШЛЫЕ ОТВЕТЫ АДМИНИСТРАТОРОВ:\n{past_block}\n\n"
             f"ОБРАЩЕНИЕ ИГРОКА:\n{text[:1500]}"
         )
-        t0 = time.perf_counter()
         # Сходство с ближайшим прошлым вопросом: по нему решается, можно ли отправить ответ без админа
         meta = {"provider": self.provider, "model": self.model, "kb_sim": round(max((s for _, _, s in past), default=0.0), 2)}
-        try:
-            raw, tin, tout = self._call(user)
-        except Exception as e:  # таймаут, сеть, лимиты — черновик остаётся шаблонным
-            meta.update(error=type(e).__name__, latency_ms=round((time.perf_counter() - t0) * 1000))
+        waited = self._acquire()
+        if waited is None:  # квота на минуту выбрана, а ждать нельзя — черновик остаётся шаблонным
+            meta.update(error="лимит запросов в минуту", latency_ms=0, wait_ms=0)
             return {**draft, "llm": meta}
+        meta["wait_ms"] = round(waited * 1000)
+        for attempt in (1, 2):
+            t0 = time.perf_counter()  # задержка вызова считается без ожидания квоты
+            try:
+                raw, tin, tout = self._call(user)
+                break
+            except Exception as e:  # таймаут, сеть, лимиты — черновик остаётся шаблонным
+                over_quota = isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429
+                if attempt == 1 and over_quota and self.max_wait >= 20:
+                    time.sleep(20)  # квоту выбрал кто-то ещё с тем же ключом: в пакетном режиме ждём и повторяем
+                    meta["wait_ms"] += 20_000
+                    continue
+                name = f"HTTP {e.response.status_code}" if isinstance(e, httpx.HTTPStatusError) else type(e).__name__
+                meta.update(error=name, latency_ms=round((time.perf_counter() - t0) * 1000))
+                return {**draft, "llm": meta}
         cost = tin / 1e6 * self.price_in + tout / 1e6 * self.price_out
         meta.update(tokens_in=tin, tokens_out=tout, cost_usd=round(cost, 6), latency_ms=round((time.perf_counter() - t0) * 1000))
 
