@@ -1,0 +1,4 @@
+# Переводы строк в репозитории — LF: Makefile и скрипты должны работать на Linux у организаторов
+* text=auto eol=lf
+*.pkl binary
+*.gz binary
