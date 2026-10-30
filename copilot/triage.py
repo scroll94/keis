@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import drafts, rules
 from .classify import Model, VerdictModel, keyword_category, priority
-from .features import category_input, verdict_input
+from .features import category_input, n_attachments, verdict_input
 from .llm import LLM
 from .normalize import content_text, detect_lang, fix_text
 from .rag import KnowledgeBase
@@ -92,8 +92,10 @@ def _normalize(t) -> dict:
         if not isinstance(m, dict):
             continue
         text = "" if m.get("text") is None else str(m.get("text"))[:MAX_TEXT]
-        attachments = m.get("attachments") if isinstance(m.get("attachments"), list) else []
-        clean.append({**m, "role": m.get("role") or "player", "text": text, "attachments": attachments})
+        # В контракте кейса attachments — число вложений («"attachments": 2»), в API бывает и список
+        clean.append({**m, "role": m.get("role") or "player", "text": text,
+                      "attachments": m.get("attachments") if isinstance(m.get("attachments"), list) else [],
+                      "n_attachments": n_attachments(m)})
     t["messages"] = clean
     if t.get("kind") not in ("complaint", "report"):
         t["kind"] = "complaint" if t.get("reported_hash") or t.get("reported_nick") else "report"
@@ -107,11 +109,37 @@ def _normalize(t) -> dict:
     return t
 
 
+CONTRACT_KEYS = ("ticket_id", "lang", "category", "priority", "is_spam_or_duplicate", "extracted", "draft_reply",
+                 "needs_human", "confidence", "reasons")
+
+
+def with_contract(r: dict) -> dict:
+    """Поля контракта кейса (POST /triage) идут первыми; после них — расширенные поля для интерфейса и отчёта."""
+    x = r["extracted"]
+    extracted = {"nickname": x.get("reported_nick"), "rule_refs": [rules.short_ref(c) for c in x.get("rule_refs_claimed", [])],
+                 "has_evidence": x.get("has_evidence", False), "server": x.get("server")}
+    extracted.update({k: v for k, v in x.items() if k not in extracted})
+    contract = {
+        "ticket_id": r["ticket_id"],
+        "lang": r["language"],
+        "category": r["category"],
+        "priority": r["priority"],
+        "is_spam_or_duplicate": bool(r["is_spam"] or r["is_duplicate"]),
+        "extracted": extracted,
+        "draft_reply": {"lang": r["draft"]["language"], "text": r["draft"]["text"],
+                        "cited": [rules.short_ref(c["ref"]) for c in r["draft"]["citations"]]},
+        "needs_human": r["needs_human"],
+        "confidence": r["confidence"],
+        "reasons": r["reasons"],
+    }
+    return {**contract, **{k: v for k, v in r.items() if k not in contract}}
+
+
 def _fallback(t, error: Exception) -> dict:
     """Ответ по контракту, если разбор всё же упал: черновик-подтверждение и обязательно человек."""
     t = t if isinstance(t, dict) else {}
     kind = t.get("kind") if t.get("kind") in ("complaint", "report") else "report"
-    return {
+    return with_contract({
         "ticket_id": t.get("ticket_id"),
         "language": "ru",
         "category": "complaint.other" if kind == "complaint" else "report.question",
@@ -127,7 +155,7 @@ def _fallback(t, error: Exception) -> dict:
         "suggested_verdict": None,
         "confidence": 0.0,
         "reasons": [f"ошибка разбора: {type(error).__name__}"],
-    }
+    })
 
 
 def _violation_codes(category: str, text: str, claimed: list[str]) -> list[str]:
@@ -180,8 +208,7 @@ class Triage:
         reasons: list[str] = []
 
         # --- факты ---
-        attachments = sum(len(m.get("attachments") or []) for m in msgs)
-        images = int(t.get("images_count") or 0) + attachments
+        images = int(t.get("images_count") or 0) + sum(m["n_attachments"] for m in msgs)
         links = text.count("<url>") + len(re.findall(r"https?://", text))
         has_evidence = images > 0 or links > 0
         claimed = rules.find_refs(" ".join([t.get("rule_refs_raw") or "", text]))
@@ -319,7 +346,7 @@ class Triage:
             needs_human, why_h = True, why_h + [f"низкая уверенность ({conf:.2f})"]
         reasons += why_h or ["можно ответить автоматически по шаблону"]
 
-        return {
+        return with_contract({
             "ticket_id": t.get("ticket_id"),
             "language": lang,
             "category": cat,
@@ -334,4 +361,4 @@ class Triage:
             "suggested_verdict": {"label": verdict, "p": round(vp, 3)} if verdict else None,
             "confidence": round(conf, 3),
             "reasons": reasons,
-        }
+        })

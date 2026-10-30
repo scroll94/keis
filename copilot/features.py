@@ -20,10 +20,21 @@ def category_input(t: dict) -> str:
     return f"[{kind}]{refs} {player_text(t)}"
 
 
+def n_attachments(m: dict) -> int:
+    """Число вложений сообщения: в контракте это число, в API может быть список."""
+    a = m.get("n_attachments", m.get("attachments"))
+    if isinstance(a, list):
+        return len(a)
+    try:
+        return max(0, int(a or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def verdict_input(t: dict) -> str:
     text = player_text(t)
     images = int(t.get("images_count") or 0) + sum(
-        len(m.get("attachments") or []) for m in t.get("messages", []) if m.get("role") == "player"
+        n_attachments(m) for m in t.get("messages", []) if m.get("role") == "player"
     )
     urls = text.count("<url>") + len(re.findall(r"https?://", text))
     accused = any(m.get("role") == "reported_player" for m in t.get("messages", []))

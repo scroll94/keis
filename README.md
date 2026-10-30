@@ -92,56 +92,37 @@ API интерфейса: `GET /api/queue`, `POST /api/tickets`, `POST /api/tick
 
 ## Контракт
 
-`POST /triage`
+`POST /triage` и каждая строка `make predict` — по контракту из документа кейса. Запрос:
 
 ```json
 {
-  "ticket_id": "abc",
   "kind": "complaint",
-  "created_at": "2026-10-30T12:00:00",
-  "region": "cis",
-  "server_lang": "ru",
-  "reporter_hash": "r1",
-  "reported_nick": "Arman_Petrov",
-  "rule_refs_raw": "2.1",
-  "images_count": 1,
-  "messages": [{"role": "player", "text": "оск родни <url>", "attachments": []}]
+  "messages": [{"role": "player", "text": "оскорбил меня и семью в чате, 2.1", "attachments": 2}]
 }
 ```
 
-Ответ:
+Принимаются и поля выгрузки (`ticket_id`, `created_at`, `region`, `server_lang`, `reporter_hash`, `reported_nick`, `rule_refs_raw`, `images_count`); `attachments` — число или список вложений. Ответ:
 
 ```json
 {
-  "ticket_id": "abc",
-  "language": "ru",
+  "ticket_id": null,
+  "lang": "ru",
   "category": "complaint.insult",
   "priority": "p2",
-  "is_spam": false,
-  "is_duplicate": false,
-  "duplicate_of": null,
-  "extracted": {
-    "reported_nick": "Arman_Petrov",
-    "rule_refs_claimed": ["ОП 2.1"],
-    "has_evidence": true,
-    "evidence": {"images_count": 1, "links": 1},
-    "server": null,
-    "region": "cis"
-  },
-  "draft": {
-    "text": "Здравствуйте! Ваша жалоба на игрока Arman_Petrov принята к рассмотрению. Предполагаемое нарушение: ОП 2.1. ...",
-    "language": "ru",
-    "citations": [
-      {"ref": "ОП 2.1", "section": "Общие правила игры", "quote": "Запрещено прямое, завуалированное и провокационное оскорбление личности игрока..."},
-      {"ref": "ЖБ 1.4.1", "section": "Правила жалоб", "quote": "Жалобы обрабатываются в течение 48 часов с момента публикации."}
-    ],
-    "template": "complaint_review"
+  "is_spam_or_duplicate": false,
+  "extracted": {"nickname": null, "rule_refs": ["2.1"], "has_evidence": true, "server": null},
+  "draft_reply": {
+    "lang": "ru",
+    "text": "Здравствуйте! Ваша жалоба принята к рассмотрению. Предполагаемое нарушение: ОП 2.1. Администратор проверит доказательства и вынесет решение; жалобы рассматриваются в течение 48 часов.\n\nС уважением, администрация Grand Mobile.",
+    "cited": ["2.1", "ЖБ 1.4.1"]
   },
   "needs_human": true,
-  "confidence": 0.93,
-  "reasons": ["категория: модель (0.93)", "приоритет: нарушение с доказательствами", "вердикт по доказательствам выносит администратор"]
+  "confidence": 1.0,
+  "reasons": ["категория: модель (1.00)", "приоритет: нарушение с доказательствами", "вероятный вердикт: approved (0.91)", "вердикт по доказательствам выносит администратор"]
 }
 ```
+
+Ссылки в `cited` и `rule_refs` записаны как в `taxonomy.json`: пункт общих правил — номером (`2.1`), остальные — с кодом раздела (`ЖБ 1.2.2`, `GZ 1.1`). После полей контракта ответ содержит расширенные поля для интерфейса и отчёта: цитаты с текстом пункта (`draft.citations`), отдельные `is_spam` и `is_duplicate`, причины для администратора (`needs_human_reasons`), вероятный вердикт, сведения о вызове LLM.
 
 ## Результаты на валидации (1000 тикетов, без LLM)
 

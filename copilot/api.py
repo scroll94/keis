@@ -56,7 +56,7 @@ class Message(BaseModel):
     role: str | None = "player"  # player | reported_player | admin
     ts: str | None = None
     text: str | None = ""
-    attachments: list[Attachment] | None = Field(default_factory=list)
+    attachments: list[Attachment] | int | str | None = Field(default_factory=list)  # в контракте кейса — число
 
 
 class Ticket(BaseModel):

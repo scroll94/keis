@@ -281,6 +281,47 @@ class BatchAndLoadTest(unittest.TestCase):
         self.assertEqual([x["ticket"] for x in s["slowest"]], ["a", "b"])
 
 
+class ContractTest(unittest.TestCase):
+    """Ответ POST /triage по контракту из документа кейса."""
+
+    def test_case_example(self):
+        from fastapi.testclient import TestClient
+
+        from copilot.api import app
+        from copilot.triage import CONTRACT_KEYS
+
+        req = {"kind": "complaint", "messages": [{"role": "player", "text": "оскорбил меня и семью в чате, 2.1", "attachments": 2}]}
+        r = TestClient(app).post("/triage", json=req)
+        self.assertEqual(r.status_code, 200)
+        j = r.json()
+        self.assertEqual(tuple(j)[: len(CONTRACT_KEYS)], CONTRACT_KEYS)  # поля контракта первыми и по порядку
+        self.assertEqual(j["lang"], "ru")
+        self.assertEqual(j["category"], "complaint.insult")
+        self.assertIn(j["priority"], ("p0", "p1", "p2", "p3"))
+        self.assertIs(j["is_spam_or_duplicate"], False)
+        self.assertEqual(j["extracted"]["rule_refs"], ["2.1"])
+        self.assertIs(j["extracted"]["has_evidence"], True)  # attachments: 2 — это доказательства
+        self.assertIn("nickname", j["extracted"])
+        self.assertIn("server", j["extracted"])
+        d = j["draft_reply"]
+        self.assertEqual(set(d), {"lang", "text", "cited"})
+        self.assertIn("2.1", d["cited"])
+        known = {rules.short_ref(c) for c in rules.load_points()}
+        self.assertTrue(set(d["cited"]) <= known)
+        self.assertIsInstance(j["needs_human"], bool)
+        self.assertIsInstance(j["confidence"], float)
+        self.assertTrue(j["reasons"] and all(isinstance(s, str) for s in j["reasons"]))
+
+    def test_short_ref(self):
+        self.assertEqual(rules.short_ref("ОП 2.1"), "2.1")
+        self.assertEqual(rules.short_ref("ЖБ 1.2.2"), "ЖБ 1.2.2")
+        self.assertEqual(rules.short_ref("GZ 1.1"), "GZ 1.1")
+
+    def test_spam_or_duplicate_flag(self):
+        tri = Triage(use_llm=False)
+        self.assertTrue(tri(ticket("+", ticket_id="sp1"))["is_spam_or_duplicate"])
+
+
 class ApiTest(unittest.TestCase):
     def test_post_triage(self):
         from fastapi.testclient import TestClient
