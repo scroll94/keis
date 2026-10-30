@@ -281,6 +281,62 @@ class BatchAndLoadTest(unittest.TestCase):
         self.assertEqual([x["ticket"] for x in s["slowest"]], ["a", "b"])
 
 
+class BulkReplyTest(unittest.TestCase):
+    def test_bulk_send_personal_text_and_undo(self):
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        import copilot.api as api
+
+        client = TestClient(api.app)
+        with tempfile.TemporaryDirectory() as tmp:
+            api.FEEDBACK_PATH = Path(tmp) / "feedback.jsonl"
+            ids = []
+            for i, nick in enumerate(["Ivan_Petrov", None]):
+                t = ticket("оск родни <url>", kind="complaint", reporter=f"bulk{i}", images_count=1)
+                t.pop("ticket_id")
+                if nick:
+                    t["reported_nick"] = nick
+                ids.append(client.post("/api/tickets", json=t).json()["ticket"]["ticket_id"])
+            items = client.post("/api/tickets/bulk", json={"ids": ids + ["нет-такого"], "action": "send",
+                                                           "text": "Жалоба на {ник} рассмотрена."}).json()["items"]
+            self.assertEqual([it["status"] for it in items], ["sent", "sent"])
+            self.assertEqual(items[0]["final_text"], "Жалоба на Ivan_Petrov рассмотрена.")
+            self.assertEqual(items[1]["final_text"], "Жалоба на этого игрока рассмотрена.")
+            items = client.post("/api/tickets/bulk", json={"ids": ids, "action": "reopen"}).json()["items"]
+            self.assertTrue(all(it["status"] == "new" and it["final_text"] is None for it in items))
+            self.assertEqual(len(api.FEEDBACK_PATH.read_text(encoding="utf-8").splitlines()), 4)
+
+    def test_bulk_without_text_keeps_own_drafts(self):
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        import copilot.api as api
+
+        client = TestClient(api.app)
+        with tempfile.TemporaryDirectory() as tmp:
+            api.FEEDBACK_PATH = Path(tmp) / "feedback.jsonl"
+            t = ticket("застрял в текстурах", reporter="bulk-own")
+            t.pop("ticket_id")
+            tid = client.post("/api/tickets", json=t).json()["ticket"]["ticket_id"]
+            item = client.post("/api/tickets/bulk", json={"ids": [tid], "action": "escalate"}).json()["items"][0]
+            self.assertEqual(item["status"], "escalated")
+            self.assertIsNone(item["final_text"])
+
+    def test_quick_replies_in_player_language(self):
+        from fastapi.testclient import TestClient
+
+        from copilot.api import app
+
+        replies = TestClient(app).get("/api/quick", params={"lang": "kk"}).json()
+        self.assertGreaterEqual(len(replies), 5)
+        self.assertTrue(all(r["text"].startswith(drafts.GREET["kk"].format(name="")) or r["id"] == "appeal_rejected" for r in replies))
+        known = set(rules.load_points())
+        self.assertTrue(all(c["ref"] in known and not PROMISE.search(r["text"]) for r in replies for c in r["citations"]))
+
+
 class ContractTest(unittest.TestCase):
     """Ответ POST /triage по контракту из документа кейса."""
 

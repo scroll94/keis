@@ -38,8 +38,9 @@
     <label class="search">
       <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
       <span class="sr-only">Поиск по очереди</span>
-      <input id="search" type="search" placeholder="Номер, ник или текст обращения" autocomplete="off">
+      <input id="search" type="search" placeholder="Номер, ник, текст или пункт правил" autocomplete="off">
     </label>
+    <button class="btn icon" id="help-btn" aria-label="Горячие клавиши">?</button>
     <button class="btn" id="new-btn" aria-label="Новое обращение"><span class="long">Новое обращение</span><span class="short">+ Новое</span></button>
   </header>
 
@@ -56,9 +57,10 @@
         <div class="list-head">
           <div class="list-head-row">
             <h2 id="list-title">Ждут администратора</h2>
-            <div id="list-source"></div>
           </div>
           <span class="meta" id="list-meta"></span>
+          <div class="list-tools" id="list-tools"></div>
+          <div class="chips" id="chips"></div>
         </div>
         <ul class="list" id="list" aria-label="Обращения"></ul>
       </section>
@@ -68,6 +70,25 @@
     <section class="tool" id="load-view" aria-label="Проверка нагрузки" hidden></section>
   </main>
 </div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<dialog id="help-dialog" aria-labelledby="help-title">
+  <form method="dialog">
+    <h2 id="help-title">Горячие клавиши</h2>
+    <dl class="keys">
+      <div><dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>следующее и предыдущее</dd></div>
+      <div><dt><kbd>x</kbd></dt><dd>выбрать обращение</dd></div>
+      <div><dt><kbd>Esc</kbd></dt><dd>снять выбор</dd></div>
+      <div><dt><kbd>g</kbd></dt><dd>список или группы</dd></div>
+      <div><dt><kbd>r</kbd></dt><dd>перейти к черновику</dd></div>
+      <div><dt><kbd>Ctrl</kbd> <kbd>Enter</kbd></dt><dd>отправить</dd></div>
+      <div><dt><kbd>e</kbd></dt><dd>эскалировать</dd></div>
+      <div><dt><kbd>/</kbd></dt><dd>поиск</dd></div>
+    </dl>
+    <div class="dialog-actions"><button class="btn primary">Понятно</button></div>
+  </form>
+</dialog>
 
 <dialog id="new-dialog" aria-labelledby="new-title">
   <form id="new-form" method="dialog">

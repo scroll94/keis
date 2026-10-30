@@ -55,9 +55,10 @@ const state = {
   items: [], llm: null, batches: [], info: null,
   mode: "queue", view: "waiting", source: "all", selected: null, query: "",
   loading: true, error: null, dirty: false, note: "",
+  checked: new Set(), tags: new Set(), listMode: "list", activeGroup: null, bulkText: null, lastChecked: null, quick: {}, chipsOpen: false,
   job: null, jobError: "", load: null, loadError: "", loadN: 500, loadC: 10, loadSource: "demo",
 };
-const timers = { job: null, load: null };
+const timers = { job: null, load: null, toast: null };
 const $ = (id) => document.getElementById(id);
 
 // Элементы создаются только через textContent: текст игроков никогда не попадает в разметку как HTML
@@ -105,13 +106,55 @@ const priorityRank = (it) => ({ p0: 0, p1: 1, p2: 2, p3: 3 })[it.result.priority
 const currentView = () => VIEWS.find((v) => v.id === state.view);
 const scoped = () => state.items.filter((it) => state.source === "all" || it.source === state.source);
 
+const itemId = (it) => String(it.ticket.ticket_id);
+const shortId = (id) => (id.length > 10 ? id.slice(0, 8) : id);
+
+// Теги обращения: по ним фильтруется очередь. Значение после двоеточия — код, подпись даёт tagLabel
+function tagsOf(it) {
+  const r = it.result, x = r.extracted;
+  return [`cat:${r.category}`, `lang:${r.language}`, `prio:${r.priority}`,
+    ...(x.nickname ? [`nick:${x.nickname}`] : []), ...x.rule_refs.map((ref) => `rule:${ref}`),
+    ...(x.has_evidence ? [] : ["flag:noev"]), ...(r.is_duplicate ? ["flag:dup"] : []), ...(r.is_spam ? ["flag:spam"] : [])];
+}
+
+function tagLabel(tag) {
+  const i = tag.indexOf(":"), kind = tag.slice(0, i), v = tag.slice(i + 1);
+  if (kind === "cat") return CATEGORY[v] || v;
+  if (kind === "lang") return LANG[v] || v;
+  if (kind === "prio") return PRIORITY[v] || v;
+  if (kind === "rule") return `Пункт ${v}`;
+  if (kind === "flag") return { noev: "Без доказательств", dup: "Повторы", spam: "Спам" }[v] || v;
+  return v;
+}
+
+function matchesSearch(it, q) {
+  if (!q) return true;
+  const r = it.result;
+  return [it.ticket.ticket_id, r.extracted.nickname, playerText(it.ticket), CATEGORY[r.category], ...r.extracted.rule_refs]
+    .some((s) => String(s ?? "").toLowerCase().includes(q));
+}
+
 function visibleItems() {
   const q = state.query.trim().toLowerCase();
   return scoped()
     .filter(currentView().test)
-    .filter((it) => !q || [it.ticket.ticket_id, it.result.extracted.reported_nick, playerText(it.ticket)]
-      .some((s) => String(s ?? "").toLowerCase().includes(q)))
+    .filter((it) => matchesSearch(it, q))
+    .filter((it) => { const tags = tagsOf(it); return [...state.tags].every((t) => tags.includes(t)); })
     .sort((a, b) => priorityRank(a) - priorityRank(b) || String(a.ticket.created_at || "").localeCompare(String(b.ticket.created_at || "")));
+}
+
+// Группа похожих: та же тема, тот же ответ, тот же язык — такие обращения можно закрыть разом
+const groupKey = (it) => [it.result.category, it.result.draft.template, it.result.language, it.result.extracted.nickname ? 1 : 0].join("|");
+
+function groupsOf(items) {
+  const map = new Map();
+  for (const it of items) {
+    const k = groupKey(it);
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(it);
+  }
+  return [...map].map(([key, list]) => ({ key, items: list }))
+    .sort((a, b) => priorityRank(a.items[0]) - priorityRank(b.items[0]) || b.items.length - a.items.length);
 }
 
 const selectedItem = () => state.items.find((it) => String(it.ticket.ticket_id) === state.selected) || null;
@@ -185,11 +228,39 @@ function renderSourceSelect() {
         s === "all" ? "Все источники" : sourceName(s)))));
 }
 
+function renderChips(items) {
+  const counts = new Map();
+  for (const it of items) for (const t of tagsOf(it)) counts.set(t, (counts.get(t) || 0) + 1);
+  const pick = (prefix, n, min = 1) => [...counts].filter(([t, c]) => t.startsWith(prefix) && c >= min && c < items.length && !state.tags.has(t))
+    .sort((a, b) => b[1] - a[1]).slice(0, n);
+  const chips = [...pick("cat:", 5), ...pick("lang:", 3), ...pick("prio:", 4), ...pick("rule:", 3, 2), ...pick("nick:", 3, 2), ...pick("flag:", 3)];
+  const top = chips.sort((a, b) => b[1] - a[1]);
+  const shown = state.chipsOpen ? top : top.slice(0, 4);
+  $("chips").replaceChildren(
+    ...[...state.tags].map((t) => h("button", { class: "chip on", onclick: () => toggleTag(t), "aria-label": `Убрать фильтр ${tagLabel(t)}` }, tagLabel(t), h("span", { "aria-hidden": "true" }, " ×"))),
+    ...shown.map(([t, c]) => h("button", { class: "chip", onclick: () => toggleTag(t) }, tagLabel(t), " ", h("span", { class: "chip-n" }, fmtNum(c)))),
+    ...(top.length > 4 ? [h("button", { class: "link chip-more", onclick: () => { state.chipsOpen = !state.chipsOpen; renderList(); } },
+      state.chipsOpen ? "Свернуть" : `Ещё ${top.length - 4}`)] : []));
+}
+
+function renderListTools(items) {
+  const open = items.filter((it) => it.status === "new");
+  const allChecked = open.length > 0 && open.every((it) => state.checked.has(itemId(it)));
+  $("list-tools").replaceChildren(...[
+    h("div", { class: "segmented seg-sm", role: "group", "aria-label": "Вид очереди" },
+      [["list", "Список"], ["groups", "Группы"]].map(([m, l]) => h("button", {
+        type: "button", "aria-pressed": state.listMode === m ? "true" : "false", onclick: () => setListMode(m) }, l))),
+    state.listMode === "list" && open.length
+      ? h("button", { class: "link", onclick: () => setChecked(allChecked ? [] : open) }, allChecked ? "Снять выбор" : "Выбрать все") : null,
+    state.checked.size ? h("button", { class: "btn btn-sm bulk-open", onclick: () => { document.body.dataset.pane = "detail"; render(); } }, `Выбрано ${fmtNum(state.checked.size)}`) : null,
+    renderSourceSelect(),
+  ].filter(Boolean));
+}
+
 function renderList() {
   const list = $("list");
   const view = currentView();
   $("list-title").textContent = view.title;
-  $("list-source").replaceChildren(...[renderSourceSelect()].filter(Boolean));
   if (state.loading) {
     $("list-meta").textContent = "";
     return list.replaceChildren(...Array.from({ length: 6 }, () => h("li", { class: "skeleton", "aria-hidden": "true" }, h("i"), h("i"))));
@@ -200,28 +271,52 @@ function renderList() {
       h("button", { class: "btn", onclick: () => loadQueue(true) }, "Повторить")));
   }
   const items = visibleItems();
-  $("list-meta").textContent = `${fmtNum(items.length)} ${plural(items.length, "обращение", "обращения", "обращений")} · сначала срочные`;
-  if (!items.length) {
+  const groups = state.listMode === "groups" ? groupsOf(items.filter((it) => it.status === "new")) : null;
+  $("list-meta").textContent = groups
+    ? `${fmtNum(groups.length)} ${plural(groups.length, "группа", "группы", "групп")} · ${fmtNum(items.length)} ${plural(items.length, "обращение", "обращения", "обращений")}`
+    : `${fmtNum(items.length)} ${plural(items.length, "обращение", "обращения", "обращений")} · сначала срочные`;
+  renderChips(items);
+  renderListTools(items);
+  if (!items.length || (groups && !groups.length)) {
     const q = state.query.trim();
-    return list.replaceChildren(h("li", { class: "empty" }, q ? `Ничего не нашлось по запросу «${q}».` : view.empty));
+    const filtered = q || state.tags.size;
+    return list.replaceChildren(h("li", { class: "empty" }, filtered ? "Под эти условия ничего не подходит. " : view.empty,
+      filtered ? h("button", { class: "link", onclick: resetFilters }, "Сбросить фильтры") : null));
   }
+  if (groups) return list.replaceChildren(...groups.map(groupRow));
   list.replaceChildren(...items.map((it) => {
-    const r = it.result, t = it.ticket, done = it.status !== "new", id = String(t.ticket_id);
+    const r = it.result, t = it.ticket, done = it.status !== "new", id = itemId(it);
     let mark = null;
     if (it.status === "sent") mark = h("span", { class: "pill neutral" }, "Отправлено");
     else if (it.status === "escalated") mark = h("span", { class: "pill neutral" }, "Эскалировано");
     else if (r.priority === "p0" || r.priority === "p1") mark = h("span", { class: `pill ${r.priority}` }, PRIORITY[r.priority]);
     else if (r.is_duplicate) mark = h("span", { class: "pill neutral" }, "Повтор");
-    return h("li", {}, h("button", {
-      class: `row${done ? " done" : ""}`, "aria-current": id === state.selected ? "true" : "false",
+    const box = h("input", { type: "checkbox", class: "row-check", "data-check": id, "aria-label": `Выбрать ${id}`, disabled: done,
+      onclick: (e) => toggleChecked(id, e.shiftKey) });
+    box.checked = state.checked.has(id);
+    return h("li", { class: "row-wrap" }, box, h("button", {
+      class: `row${done ? " done" : ""}`, "aria-current": !state.checked.size && id === state.selected ? "true" : "false",
       "data-id": id, onclick: () => select(id, true),
     },
       h("span", { class: "row-title" }, CATEGORY[r.category] || r.category),
       h("span", { class: "row-slots" }, h("span", { class: "row-lang" }, (r.language || "").toUpperCase()), mark),
-      h("span", { class: "row-text" }, h("span", { class: "id" }, id), playerText(t) || "—"),
+      h("span", { class: "row-text" }, h("span", { class: "id", title: id }, shortId(id)), playerText(t) || "—"),
       h("span", { class: "row-time" }, fmtTime(t.created_at)),
     ));
   }));
+}
+
+function groupRow(g) {
+  const first = g.items[0], r = first.result;
+  const prio = r.priority === "p0" || r.priority === "p1" ? h("span", { class: `pill ${r.priority}` }, PRIORITY[r.priority]) : null;
+  return h("li", {}, h("button", {
+    class: "row group-row", "aria-current": state.activeGroup === g.key ? "true" : "false", "data-group": g.key,
+    onclick: () => openGroup(g),
+  },
+    h("span", { class: "row-title" }, CATEGORY[r.category] || r.category),
+    h("span", { class: "row-slots" }, h("span", { class: "row-lang" }, (r.language || "").toUpperCase()), prio),
+    h("span", { class: "row-text" }, `Ответ: ${r.draft.template === "llm" ? "свой у каждого" : TEMPLATE[r.draft.template] || r.draft.template}`),
+    h("span", { class: "group-count num" }, fmtNum(g.items.length))));
 }
 
 function fact(label, value, note) {
@@ -278,8 +373,29 @@ function processSteps(it) {
   ];
 }
 
+function citesBlock(list) {
+  return list.length
+    ? h("ul", { class: "cites", "aria-label": "Основания из правил" }, list.map((c) => h("li", { class: "cite" },
+        h("span", { class: "code" }, c.ref), h("span", { class: "section" }, c.section), h("q", {}, c.quote))))
+    : h("p", { class: "no-cites" }, "Без ссылок на правила: в этой ситуации они не нужны.");
+}
+
+function similarBlock(it) {
+  const open = state.items.filter((x) => x.status === "new" && x !== it);
+  const same = open.filter((x) => groupKey(x) === groupKey(it));
+  const nick = it.result.extracted.nickname;
+  const sameNick = nick ? open.filter((x) => x.result.extracted.nickname === nick) : [];
+  if (!same.length && !sameNick.length) return null;
+  return h("div", { class: "similar" },
+    same.length ? h("div", {}, h("span", {}, `Такая же тема и ответ: ещё ${fmtNum(same.length)}`),
+      it.status === "new" ? h("button", { class: "btn btn-sm", onclick: () => openGroup({ key: groupKey(it), items: [it, ...same] }) }, `Ответить всем ${fmtNum(same.length + 1)}`) : null) : null,
+    sameNick.length ? h("div", {}, h("span", {}, `На этого же игрока: ещё ${fmtNum(sameNick.length)}`),
+      h("button", { class: "btn btn-sm", onclick: () => toggleTag(`nick:${nick}`) }, "Показать")) : null);
+}
+
 function renderDetail() {
   const pane = $("detail");
+  if (state.checked.size && !state.loading) return renderBulk();
   const it = selectedItem();
   if (state.loading) return pane.replaceChildren(h("div", { class: "detail-body" }, h("div", { class: "skeleton" }, h("i"), h("i"), h("i"))));
   if (!it) {
@@ -311,7 +427,10 @@ function renderDetail() {
       h("div", { class: "d-head" }, h("h2", { id: "detail-title", tabindex: "-1" }, CATEGORY[r.category] || r.category),
         h("span", { class: `pill ${r.priority === "p0" || r.priority === "p1" ? r.priority : "neutral"}` }, PRIORITY[r.priority]),
         h("span", { class: "d-lang" }, LANG[r.language] || r.language)),
+      h("div", { class: "chips detail-tags" }, tagsOf(it).filter((tag) => !tag.startsWith("flag:")).map((tag) =>
+        h("button", { class: `chip${state.tags.has(tag) ? " on" : ""}`, title: "Показать все такие обращения", onclick: () => toggleTag(tag) }, tagLabel(tag)))),
       decisionBox(it),
+      similarBlock(it),
       h("section", { class: "block" },
         h("div", { class: "block-head" }, h("h3", {}, "Сообщение игрока"), h("span", { class: "meta" }, "слова игрока, не проверены")),
         h("p", { class: "message" }, playerText(t) || "—"),
@@ -330,11 +449,9 @@ function renderDetail() {
         h("div", { class: "block-head" }, h("h3", {}, "Черновик ответа"),
           h("span", { class: "meta" }, `${source} · ${LANG[d.language] || d.language}`),
           open ? h("span", { class: "meta" }, "Ctrl+Enter — отправить") : null),
+        open ? h("div", { class: "quick", id: "quick", "aria-label": "Быстрые ответы" }) : null,
         draft,
-        d.citations.length
-          ? h("ul", { class: "cites", "aria-label": "Основания из правил" }, d.citations.map((c) => h("li", { class: "cite" },
-              h("span", { class: "code" }, c.ref), h("span", { class: "section" }, c.section), h("q", {}, c.quote))))
-          : h("p", { class: "no-cites" }, "Без ссылок на правила: в этой ситуации они не нужны.")),
+        h("div", { id: "cites-box" }, citesBlock(d.citations))),
       h("details", { class: "block process" },
         h("summary", {}, h("span", { class: "summary-title" }, "Как обработано"),
           h("span", { class: "meta" }, it.processing_ms != null ? `${steps.length} шагов за ${fmtMs(it.processing_ms)}` : `${steps.length} шагов`)),
@@ -348,6 +465,117 @@ function renderDetail() {
     ),
   );
   updateStatus();
+  if (open) renderQuick(d.language);
+}
+
+async function renderQuick(lang) {
+  try {
+    if (!state.quick[lang]) state.quick[lang] = await fetch(`/api/quick?lang=${encodeURIComponent(lang)}`).then((r) => r.json());
+  } catch { return; }
+  const box = $("quick");
+  if (!box) return;
+  box.replaceChildren(...state.quick[lang].map((q) => h("button", { class: "chip", type: "button", onclick: () => {
+    $("draft").value = q.text;
+    $("cites-box").replaceChildren(citesBlock(q.citations));
+    state.dirty = true;
+    state.note = `Быстрый ответ: ${q.title}`;
+    updateStatus();
+  } }, q.title)));
+}
+
+// ---------- Ответ сразу многим ----------
+function renderBulk() {
+  const pane = $("detail");
+  const items = state.items.filter((it) => state.checked.has(itemId(it)));
+  const humans = items.filter((it) => it.result.needs_human);
+  const keys = new Set(items.map(groupKey));
+  const first = items[0], r = first.result;
+  const sameText = keys.size === 1 && !["llm", "question_kb"].includes(r.draft.template);
+  const nick = r.extracted.nickname;
+  const sample = nick ? r.draft.text.replaceAll(nick, "{ник}") : r.draft.text;
+  const reasons = [...new Set(humans.flatMap((it) => (it.result.needs_human_reasons || []).map((s) => s.replace(/\s*\([\d.,]+\)$/, ""))))].slice(0, 3);
+  const n = items.length;
+  const shown = items.slice(0, 100);
+  pane.replaceChildren(
+    h("div", { class: "detail-body" },
+      h("button", { class: "btn back", onclick: showList }, "← К очереди"),
+      h("div", { class: "d-head" }, h("h2", { id: "detail-title", tabindex: "-1" }, `Выбрано ${fmtNum(n)} ${plural(n, "обращение", "обращения", "обращений")}`),
+        h("button", { class: "link", onclick: () => setChecked([]) }, "Снять выбор")),
+      h("p", { class: "d-lang" }, keys.size === 1
+        ? `${CATEGORY[r.category] || r.category} · ${LANG[r.language] || r.language}`
+        : `${fmtNum(keys.size)} разных ${plural(keys.size, "группа", "группы", "групп")} ответов: каждому уйдёт его черновик`),
+      humans.length
+        ? h("div", { class: "decision human" }, h("h3", {}, `${fmtNum(humans.length)} из ${fmtNum(n)} ждут решения администратора`),
+            h("ul", {}, reasons.map((s) => h("li", {}, humanize(cap(s))))))
+        : h("div", { class: "decision auto" }, h("h3", {}, "Можно ответить всем без проверки"), h("p", {}, "Черновики по шаблону, решения по существу не требуется.")),
+      h("section", { class: "block" },
+        h("div", { class: "block-head" }, h("h3", {}, "Ответ"),
+          sameText ? h("button", { class: "link", onclick: () => { state.bulkText = state.bulkText === null ? sample : null; renderBulk(); } },
+            state.bulkText === null ? "Изменить текст для всех" : "Вернуть черновики") : null),
+        sameText
+          ? (() => {
+              const area = h("textarea", { class: "draft", id: "bulk-text", "aria-label": "Текст ответа всем", readonly: state.bulkText === null,
+                oninput: (e) => { state.bulkText = e.target.value; } });
+              area.value = state.bulkText ?? sample;
+              return area;
+            })()
+          : h("p", { class: "muted" }, "У каждого обращения свой черновик, он и будет отправлен."),
+        sameText && state.bulkText !== null ? h("p", { class: "muted" }, "{ник} заменится ником нарушителя из каждого обращения.") : null),
+      h("section", { class: "block" },
+        h("div", { class: "block-head" }, h("h3", {}, "Обращения")),
+        h("ul", { class: "bulk-list" }, shown.map((it) => {
+          const id = itemId(it);
+          const box = h("input", { type: "checkbox", "aria-label": `Убрать ${id}`, onclick: () => toggleChecked(id) });
+          box.checked = true;
+          return h("li", {}, box,
+            h("button", { class: "bulk-open-row", onclick: () => openOne(id) }, h("span", { class: "mono", title: id }, shortId(id)), " ", playerText(it.ticket) || "—"));
+        })),
+        n > shown.length ? h("p", { class: "muted" }, `и ещё ${fmtNum(n - shown.length)}`) : null)),
+    h("div", { class: "actions" },
+      h("button", { class: "btn primary", onclick: () => bulkDecide("send") }, `Отправить ${fmtNum(n)} ${plural(n, "ответ", "ответа", "ответов")}`),
+      h("button", { class: "btn", onclick: () => bulkDecide("escalate") }, "Эскалировать"),
+      h("span", { class: "status", id: "status", role: "status" }, "Ctrl+Enter — отправить")));
+}
+
+async function postBulk(ids, action, text) {
+  const res = await fetch("/api/tickets/bulk", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids, action, text }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const updated = new Map((await res.json()).items.map((it) => [itemId(it), it]));
+  state.items = state.items.map((it) => updated.get(itemId(it)) || it);
+}
+
+async function bulkDecide(action) {
+  const items = state.items.filter((it) => state.checked.has(itemId(it)));
+  const humans = items.filter((it) => it.result.needs_human).length;
+  if (action === "send" && humans && !confirm(`Отправить ${items.length} ${plural(items.length, "ответ", "ответа", "ответов")}? ${humans} из них ждут решения администратора.`)) return;
+  const ids = items.map(itemId);
+  try {
+    await postBulk(ids, action, state.bulkText ?? undefined);
+    state.checked.clear();
+    state.bulkText = null;
+    state.activeGroup = null;
+    document.body.dataset.pane = "list";
+    reselect();
+    render();
+    showToast(`${action === "send" ? "Отправлено" : "Эскалировано"}: ${fmtNum(ids.length)}`, ids);
+  } catch (e) {
+    showToast(`Не удалось: ${e.message}`);
+  }
+}
+
+function showToast(text, undoIds) {
+  const el = $("toast");
+  clearTimeout(timers.toast);
+  el.replaceChildren(h("span", {}, text), undoIds ? h("button", { class: "link toast-undo", onclick: async () => {
+    el.hidden = true;
+    await postBulk(undoIds, "reopen");
+    reselect();
+    render();
+  } }, "Отменить") : null);
+  el.hidden = false;
+  timers.toast = setTimeout(() => { el.hidden = true; }, 10000);
 }
 
 function updateStatus() {
@@ -601,7 +829,75 @@ async function startLoad() {
 // ---------- Действия в очереди ----------
 function reselect() {
   const items = visibleItems();
-  if (!items.some((it) => String(it.ticket.ticket_id) === state.selected)) state.selected = items[0] ? String(items[0].ticket.ticket_id) : null;
+  if (!items.some((it) => itemId(it) === state.selected)) state.selected = items[0] ? itemId(items[0]) : null;
+}
+
+function toggleTag(tag) {
+  if (state.tags.has(tag)) state.tags.delete(tag);
+  else state.tags.add(tag);
+  state.mode = "queue";
+  state.checked.clear();
+  state.activeGroup = null;
+  document.body.dataset.pane = "list";
+  reselect();
+  render();
+}
+
+function resetFilters() {
+  state.tags.clear();
+  state.query = "";
+  $("search").value = "";
+  reselect();
+  render();
+}
+
+function setListMode(m) {
+  state.listMode = m;
+  state.checked.clear();
+  state.activeGroup = null;
+  state.bulkText = null;
+  render();
+}
+
+function setChecked(items) {
+  state.checked = new Set(items.map(itemId));
+  state.activeGroup = null;
+  state.bulkText = null;
+  render();
+}
+
+function toggleChecked(id, range) {
+  const ids = visibleItems().filter((it) => it.status === "new").map(itemId);
+  if (range && state.lastChecked && ids.includes(state.lastChecked) && ids.includes(id)) {
+    const [a, b] = [ids.indexOf(state.lastChecked), ids.indexOf(id)].sort((x, y) => x - y);
+    ids.slice(a, b + 1).forEach((x) => state.checked.add(x));
+  } else if (state.checked.has(id)) state.checked.delete(id);
+  else state.checked.add(id);
+  state.lastChecked = id;
+  state.bulkText = null;
+  if (!state.checked.size) state.activeGroup = null;
+  render();
+  document.querySelector(`[data-check="${CSS.escape(id)}"]`)?.focus();
+}
+
+function openGroup(g) {
+  if (g.items.length === 1) return openOne(itemId(g.items[0]));
+  state.checked = new Set(g.items.map(itemId));
+  state.activeGroup = g.key;
+  state.bulkText = null;
+  document.body.dataset.pane = "detail";
+  render();
+  $("detail").scrollTop = 0;
+}
+
+function openOne(id) {
+  state.checked.clear();
+  state.activeGroup = null;
+  state.bulkText = null;
+  state.selected = id;
+  document.body.dataset.pane = "detail";
+  render();
+  $("detail").scrollTop = 0;
 }
 
 function switchView(id) {
@@ -661,7 +957,7 @@ async function decide(action) {
       render();
       return;
     }
-    $("flash").textContent = `${id}: ${action === "send" ? "ответ отправлен" : "передано старшей администрации"} в ${fmtTime(updated.decided_at)}`;
+    showToast(`${id}: ${action === "send" ? "ответ отправлен" : "передано старшей администрации"}`, [id]);
     // Следующее обращение того же раздела — чтобы разбирать очередь подряд
     const after = visibleItems().map((x) => String(x.ticket.ticket_id));
     state.selected = after.includes(id) ? id : before.slice(before.indexOf(id) + 1).find((x) => after.includes(x)) ?? after[after.length - 1] ?? null;
@@ -751,19 +1047,57 @@ $("menu-btn").addEventListener("click", () => {
   const open = $("sidebar").classList.toggle("open");
   $("menu-btn").setAttribute("aria-expanded", String(open));
 });
-$("list").addEventListener("keydown", (e) => {
-  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-  const ids = visibleItems().map((it) => String(it.ticket.ticket_id));
-  const i = ids.indexOf(state.selected);
-  const next = ids[Math.min(ids.length - 1, Math.max(0, i + (e.key === "ArrowDown" ? 1 : -1)))];
+function moveSelection(delta) {
+  if (state.listMode === "groups") {
+    const gs = groupsOf(visibleItems().filter((it) => it.status === "new"));
+    const i = gs.findIndex((g) => g.key === state.activeGroup);
+    const g = gs[Math.min(gs.length - 1, Math.max(0, i + delta))];
+    if (g) openGroup(g);
+    return;
+  }
+  const ids = visibleItems().map(itemId);
+  const next = ids[Math.min(ids.length - 1, Math.max(0, ids.indexOf(state.selected) + delta))];
   if (!next || next === state.selected) return;
-  e.preventDefault();
+  if (state.dirty && !confirm("Правка черновика не сохранена. Перейти без сохранения?")) return;
   state.selected = next;
   state.dirty = false;
   state.note = "";
   render();
-  document.querySelector(`.row[data-id="${CSS.escape(next)}"]`)?.focus();
+  document.querySelector(`.row[data-id="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" });
+}
+
+document.addEventListener("keydown", (e) => {
+  if (document.querySelector("dialog[open]")) return;
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+    e.preventDefault();
+    if (state.mode !== "queue") return;
+    if (state.checked.size) bulkDecide("send");
+    else if (selectedItem()?.status === "new") decide("send");
+    return;
+  }
+  if (e.target.matches?.("input, textarea, select")) {
+    if (e.key === "Escape") e.target.blur();
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey || state.mode !== "queue") return;
+  const it = selectedItem();
+  const actions = {
+    j: () => moveSelection(1), ArrowDown: () => moveSelection(1),
+    k: () => moveSelection(-1), ArrowUp: () => moveSelection(-1),
+    x: () => { if (it?.status === "new") toggleChecked(state.selected); },
+    r: () => $("draft")?.focus(),
+    e: () => { if (state.checked.size) bulkDecide("escalate"); else if (it?.status === "new") decide("escalate"); },
+    g: () => setListMode(state.listMode === "list" ? "groups" : "list"),
+    "/": () => $("search").focus(),
+    "?": () => $("help-dialog").showModal(),
+    Escape: () => { if (state.checked.size) setChecked([]); },
+  };
+  if (actions[e.key]) {
+    e.preventDefault();
+    actions[e.key]();
+  }
 });
+$("help-btn").addEventListener("click", () => $("help-dialog").showModal());
 setupDialog();
 fetch("/api/info").then((r) => r.json()).then((info) => { state.info = info; render(); }).catch(() => {});
 loadQueue(true);
