@@ -30,16 +30,25 @@
 
 ## Запуск
 
+На чистой копии репозитория достаточно одной команды:
+
 ```bash
-make install                                    # .venv и зависимости
-make train                                      # база знаний + модели (несколько минут)
-make predict IN=tickets.jsonl OUT=pred.jsonl    # пакетная обработка
-make serve                                      # HTTP-сервис на :8000
-make eval                                       # метрики на валидации -> artifacts/eval_report.md
-make test                                       # тесты
+make predict DATA=/путь/к/handout IN=tickets.jsonl OUT=pred.jsonl
 ```
 
-Данные кейса по умолчанию берутся из `../grand-support-copilot-handout-2026-10-27/handout`, путь меняется переменной `COPILOT_DATA_DIR`. Данные и всё, что из них получено (`artifacts/`), в репозиторий не попадают.
+При первом запуске она сама создаёт окружение `.venv`, ставит зависимости и обучает модели на `tickets_train.jsonl.gz` из папки `DATA` (около 5 минут, один раз). Моделей нет в репозитории: они получены из данных кейса, а публиковать данные и всё, что из них получено, запрещено. Если файла `tickets_train.jsonl.gz` нет, сервис всё равно работает, но только на правилах и менее точно. Файл `rules.json` нужен всегда: из него берутся цитаты.
+
+Остальные команды:
+
+```bash
+make serve      # HTTP-сервис на :8000
+make eval       # метрики на валидации -> artifacts/eval_report.md
+make train      # полное обучение с отложенной проверкой и метриками
+make test       # тесты
+make install    # пересоздать окружение
+```
+
+По умолчанию `DATA` — это `../grand-support-copilot-handout-2026-10-27/handout`. Вместо `DATA=...` можно задать переменную окружения `COPILOT_DATA_DIR`.
 
 ### LLM (необязательно)
 

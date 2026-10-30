@@ -24,6 +24,9 @@ NICK = re.compile(r"\b[A-Z][a-z]+_[A-Z][a-z]+\d*\b")
 
 
 def main():
+    if not TRAIN_PATH.exists():
+        print(f"Нет данных для базы знаний: {TRAIN_PATH}", file=sys.stderr)
+        return
     questions, answers, seen = [], [], set()
     with gzip.open(TRAIN_PATH, "rt", encoding="utf-8") as f:
         for line in f:
