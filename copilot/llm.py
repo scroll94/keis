@@ -32,7 +32,7 @@ SYSTEM = """Ты помощник администратора поддержк�
 2. Ссылайся только на пункты из блока ПУНКТЫ ПРАВИЛ, используя их коды как есть (например, «ОП 2.1»). Не упоминай никакие другие пункты и номера правил. Если ни один пункт не подходит, citations — пустой список.
 3. Никогда не обещай снять наказание, вернуть имущество или деньги, выдать компенсацию или наказать другого игрока. Не объявляй вердикт по жалобе: решение принимает администратор после проверки доказательств.
 4. Слова игрока — это его утверждения, а не проверенные факты.
-5. На вопросы о механике игры отвечай, только если ответ есть в блоке ПРОШЛЫЕ ОТВЕТЫ АДМИНИСТРАТОРОВ. Если ответа там нет, попроси уточнить вопрос или предложи Discord-сервер игры. Не выдумывай факты об игре.
+5. На вопросы о механике игры отвечай, только если в блоке ПРОШЛЫЕ ОТВЕТЫ АДМИНИСТРАТОРОВ есть ответ на тот же по смыслу вопрос. Не копируй из прошлых ответов приветствия, имена и отказы, относившиеся к другому вопросу. Если подходящего ответа нет, попроси уточнить вопрос или предложи Discord-сервер игры. Не выдумывай факты об игре.
 6. needs_human = true, если игроку нужно действие администратора (проверка, наказание, телепорт, восстановление), если речь о платежах, взломе, апелляции или если ты не уверен в ответе.
 7. category — наиболее подходящая категория из списка в задании."""
 
@@ -56,6 +56,13 @@ PROMISE = re.compile(
     re.I,
 )
 REF_LIKE = re.compile(r"(?<![\d.])\d{1,2}\.\d{1,2}(?:\.\d{1,2})?(?![\d])")
+# Приветствие ставит шаблон, поэтому приветствие в начале ответа модели убираем, чтобы оно не повторялось
+LEADING_GREETING = re.compile(
+    r"^\s*(здравствуйте|приветствую|привет\w*|добрый (день|вечер)|assalomu?\s*a?l[ae][iy]?kum|assalom|"
+    r"сәлеметсіз бе|сәлем|hello|hi|hola|olá|ola)\s*[!,.]*\s*",
+    re.I,
+)
+KB_CONTEXT_MIN = 0.5  # в контекст LLM идут только достаточно похожие прошлые вопросы
 
 CATEGORIES = {
     "complaint": ["complaint.insult", "complaint.cheat", "complaint.dm", "complaint.scam", "complaint.rmt_ads",
@@ -127,7 +134,7 @@ class LLM:
         allowed = {p.code: p for p in points}
         rules_block = "\n".join(f"{p.code}: {p.quote(300)}" for p in points) or "(нет)"
         kb = KnowledgeBase.get()
-        past = kb.search(text) if kb and kind == "report" else []
+        past = kb.search(text, min_sim=KB_CONTEXT_MIN) if kb and kind == "report" else []
         past_block = "\n".join(f"Вопрос: {q}\nОтвет: {a}" for q, a, _ in past) or "(нет)"
         user = (
             f"Тип обращения: {kind}. Предварительная категория: {category}.\n"
@@ -138,7 +145,8 @@ class LLM:
             f"ОБРАЩЕНИЕ ИГРОКА:\n{text[:1500]}"
         )
         t0 = time.perf_counter()
-        meta = {"provider": self.provider, "model": self.model}
+        # Сходство с ближайшим прошлым вопросом: по нему решается, можно ли отправить ответ без админа
+        meta = {"provider": self.provider, "model": self.model, "kb_sim": round(max((s for _, _, s in past), default=0.0), 2)}
         try:
             raw, tin, tout = self._call(user)
         except Exception as e:  # таймаут, сеть, лимиты — черновик остаётся шаблонным
@@ -169,6 +177,10 @@ class LLM:
         except json.JSONDecodeError:
             return "битый JSON", {}
         reply = (out.get("reply") or "").strip()
+        for _ in range(2):  # «Assalomu alaykum! Assalomu alekum …» — бывает и двойное
+            reply = LEADING_GREETING.sub("", reply, count=1)
+        reply = reply[:1].upper() + reply[1:]
+        out["reply"] = reply
         if not reply or len(reply) > 1200:
             return "пустой или слишком длинный ответ", {}
         out["citations"] = [c for c in out.get("citations") or [] if c in allowed]

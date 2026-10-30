@@ -304,6 +304,9 @@ class Triage:
             needs_human, why_h = True, why_h + ["нужны действия администратора в игре"]
         if situation == "question" and draft["template"] != "llm":
             needs_human, why_h = True, why_h + ["ответ на вопрос требует знаний администратора"]
+        # Ответ LLM на вопрос уходит без админа, только если опирается на близкий прошлый ответ администратора
+        if cat == "report.question" and draft["template"] == "llm" and llm_meta.get("kb_sim", 0) < KB_MIN:
+            needs_human, why_h = True, why_h + ["ответ LLM без похожего прошлого ответа администратора, стоит проверить"]
         if situation == "question_kb" and (kb_sim < KB_AUTO or len(kb_answer) < 8):
             needs_human, why_h = True, why_h + ["ответ из базы стоит проверить администратору"]
         if llm_meta.get("needs_human"):
