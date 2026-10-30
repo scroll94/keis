@@ -124,6 +124,32 @@ class LLMGuardTest(unittest.TestCase):
         self.assertEqual(d["llm"]["error"], "TimeoutError")
 
 
+class AdminUiTest(unittest.TestCase):
+    def test_queue_decision_writes_feedback(self):
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        import copilot.api as api
+
+        client = TestClient(api.app)
+        with tempfile.TemporaryDirectory() as tmp:
+            api.FEEDBACK_PATH = Path(tmp) / "feedback.jsonl"
+            queue = client.get("/api/queue").json()
+            self.assertGreaterEqual(len(queue["items"]), 10)  # демо-набор
+            self.assertEqual(client.get("/").status_code, 200)
+
+            item = client.post("/api/tickets", json={"kind": "report", "server_lang": "ru",
+                                                     "messages": [{"role": "player", "text": "застрял в текстурах, помогите"}]}).json()
+            tid = item["ticket"]["ticket_id"]
+            r = client.post(f"/api/tickets/{tid}/decision", json={"action": "send", "text": "Здравствуйте! Иду к вам."}).json()
+            self.assertEqual(r["status"], "sent")
+            record = json.loads(api.FEEDBACK_PATH.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertTrue(record["edited"])
+            self.assertEqual(record["final"], "Здравствуйте! Иду к вам.")
+            self.assertEqual(client.post("/api/tickets/nope/decision", json={"action": "send"}).status_code, 404)
+
+
 class ApiTest(unittest.TestCase):
     def test_post_triage(self):
         from fastapi.testclient import TestClient

@@ -50,6 +50,10 @@ def keyword_category(kind: str, text: str, has_evidence: bool = True) -> tuple[s
         for cat, pat in REPORT_KW.items():
             m = re.search(pat, t)
             if m:
+                # Явный вопрос латиницей (en/uz/es/pt, «?» и хотя бы три слова) — точное правило:
+                # модель обучена почти только на русском и путает такие вопросы с оффтопом
+                if cat == "report.question" and "?" in t and len(t.split()) >= 3 and not re.search("[а-яёәғқңөұүһі]", t):
+                    return cat, 0.85, "вопрос со знаком «?»"
                 return cat, 0.7, f"ключевое слово «{m.group(0).strip()}»"
         return "report.question" if len(t) > 25 else "report.offtopic", 0.4, "нет явных признаков"
     if INVALID_COMPLAINT.match(t) and not has_evidence:

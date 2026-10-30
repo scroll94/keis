@@ -10,7 +10,12 @@ from .normalize import content_text, detect_lang, fix_text
 from .rag import KnowledgeBase
 
 NICK = re.compile(r"\b[A-Z][a-z]+_[A-Z][a-z]+\d{0,3}\b")
-PLAYER_ID = re.compile(r"(?:^|\s|id\s?|\[)(\d{1,4})(?:\]|\s|$)")
+# Номер игрока в репорте («123 дм», «id 45»), но не сумма или срок («500 рублей», «3 дня»)
+PLAYER_ID = re.compile(
+    r"(?:^|\s|id\s?|айди\s?|\[)(\d{1,4})(?=\]|\s|$)"
+    r"(?!\s*(?:руб|р\b|₽|гк|gc|тенге|тг|сум|млн|млрд|тыс|к\b|\$|%|мин|час|сек|дн|лвл|lvl|уров|раз|шт))",
+    re.I,
+)
 SERVER = re.compile(r"(\d{1,2})\s*(?:сервер|сервак|server|serv)|(?:сервер|server)\s*№?\s*(\d{1,2})", re.I)
 APPEAL = re.compile(
     r"не согл|норози|norozi|ban ?yech|yechib ber|banni ol|бан ал|банды ал|разбан|сним(ите|и)? (бан|мут|варн|наказ|деморган)|незаслуж|ни за что|без причины (дал|выдал|кинул|посадил)|"
@@ -257,6 +262,7 @@ class Triage:
             "extracted": extracted,
             "draft": draft,
             "needs_human": needs_human,
+            "needs_human_reasons": why_h,
             "suggested_verdict": {"label": verdict, "p": round(vp, 3)} if verdict else None,
             "confidence": round(conf, 3),
             "reasons": reasons,

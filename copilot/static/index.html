@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Очередь обращений · Support Copilot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-pane="list">
+<div class="app">
+  <aside class="sidebar" id="sidebar" aria-label="Разделы">
+    <div class="brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H11l-4.5 4v-4h0A2.5 2.5 0 0 1 4 13.5z" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-linejoin="round"/>
+        <text x="12" y="13.2" text-anchor="middle" font-size="9.5" font-weight="600" fill="var(--accent)" font-family="IBM Plex Sans, sans-serif">§</text>
+      </svg>
+      <div>
+        <div class="brand-name">Support Copilot</div>
+        <div class="brand-scope">Grand Mobile · поддержка</div>
+      </div>
+    </div>
+    <nav>
+      <div class="nav-label">Очередь</div>
+      <div id="nav"></div>
+    </nav>
+    <div class="sidebar-foot" id="mode"></div>
+  </aside>
+
+  <header class="topbar">
+    <button class="btn icon menu-btn" id="menu-btn" aria-label="Открыть разделы" aria-controls="sidebar" aria-expanded="false">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </button>
+    <label class="search">
+      <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <span class="sr-only">Поиск по очереди</span>
+      <input id="search" type="search" placeholder="Номер, ник или текст обращения" autocomplete="off">
+    </label>
+    <button class="btn" id="new-btn" aria-label="Новое обращение"><span class="long">Новое обращение</span><span class="short">+ Новое</span></button>
+  </header>
+
+  <main class="sheet">
+    <div class="title-row">
+      <div>
+        <h1>Очередь обращений</h1>
+        <p class="finding" id="finding">Загружаю очередь…</p>
+      </div>
+      <p class="flash" id="flash" role="status" aria-live="polite"></p>
+    </div>
+    <div class="panes">
+      <section class="list-pane" aria-labelledby="list-title">
+        <div class="list-head">
+          <h2 id="list-title">Ждут администратора</h2>
+          <span class="meta" id="list-meta"></span>
+        </div>
+        <ul class="list" id="list" aria-label="Обращения"></ul>
+      </section>
+      <section class="detail" id="detail" aria-label="Обращение"></section>
+    </div>
+  </main>
+</div>
+
+<dialog id="new-dialog" aria-labelledby="new-title">
+  <form id="new-form" method="dialog">
+    <h2 id="new-title">Новое обращение</h2>
+    <p class="dialog-sub">Сервис разберёт его так же, как обращение из игры, и поставит в очередь.</p>
+    <fieldset class="field">
+      <legend>Откуда пришло</legend>
+      <div class="segmented" role="radiogroup">
+        <label><input type="radio" name="kind" value="complaint" checked><span>Жалоба из лаунчера</span></label>
+        <label><input type="radio" name="kind" value="report"><span>Репорт из игры</span></label>
+      </div>
+    </fieldset>
+    <div class="field">
+      <label for="f-text">Текст игрока</label>
+      <textarea id="f-text" name="text" rows="4" required></textarea>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="f-server">Сервер</label>
+        <select id="f-server" name="server" class="input">
+          <option value="ru">СНГ</option>
+          <option value="kk">Казахстан</option>
+          <option value="uz">Узбекистан</option>
+        </select>
+      </div>
+      <div class="field" data-complaint>
+        <label for="f-nick">Ник нарушителя</label>
+        <input id="f-nick" name="nick" class="input" placeholder="Имя_Фамилия">
+      </div>
+      <div class="field" data-complaint>
+        <label for="f-images">Скриншотов</label>
+        <input id="f-images" name="images" class="input num" type="number" min="0" max="20" value="1">
+      </div>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel" formnovalidate>Отмена</button>
+      <button class="btn primary" id="new-submit" value="ok">Разобрать</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

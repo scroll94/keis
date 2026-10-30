@@ -8,3 +8,6 @@ artifacts/
 .venv/
 __pycache__/
 *.pyc
+
+# Рабочие файлы проверки дизайна
+.taste-skill/
