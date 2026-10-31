@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 
-from .config import RULES_PATH
+from .config import PUBLIC, RULES_PATH
 
 # Короткие коды разделов, которыми пользуются админы и игроки («2.1 ОП», «1.2 GZ», «ЖБ 1.1.2»)
 SECTION_CODES = {
@@ -37,7 +37,9 @@ class Point:
         return f"{self.section} {self.ref}"
 
     def quote(self, limit: int = 220) -> str:
-        """Дословный фрагмент пункта без блока санкций."""
+        """Дословный фрагмент пункта без блока санкций. В открытой демо-версии текст правил не показываем."""
+        if PUBLIC:
+            return ""
         t = self.text.split(" | ")[0].strip()
         if len(t) <= limit:
             return t

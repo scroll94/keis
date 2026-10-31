@@ -189,7 +189,7 @@ function renderNav() {
     class: "nav-item", "aria-current": state.mode === "queue" && state.view === v.id ? "true" : "false",
     onclick: () => switchView(v.id),
   }, h("span", {}, v.title), v.count ? h("span", { class: "count" }, fmtNum(items.filter(v.test).length)) : null)));
-  $("nav-tools").replaceChildren(...TOOLS.map((t) => h("button", {
+  $("nav-tools").replaceChildren(...TOOLS.filter((t) => !(state.info?.public && t.id === "batch")).map((t) => h("button", {
     class: "nav-item", "aria-current": state.mode === t.id ? "true" : "false", onclick: () => switchMode(t.id),
   }, h("span", {}, t.nav || t.title),
     t.id === "batch" && state.job && !state.job.finished ? h("span", { class: "count" }, pct(state.job.done, state.job.total)) : null,
@@ -198,7 +198,9 @@ function renderNav() {
     state.llm
       ? h("p", {}, h("strong", {}, "Черновики: шаблоны и LLM"), `${state.llm.model}${state.info?.llm?.rpm ? `, до ${state.info.llm.rpm} в минуту` : ""}`)
       : h("p", {}, h("strong", {}, "Черновики: шаблоны"), "LLM не подключена, $0 за обращение"),
-    h("p", {}, h("strong", {}, "Решения администраторов"), "сохраняются для дообучения"),
+    state.info?.public
+      ? h("p", {}, h("strong", {}, "Открытая демо-версия"), "обращения выдуманные, цитаты правил скрыты, база ответов и LLM выключены, очередь общая для всех")
+      : h("p", {}, h("strong", {}, "Решения администраторов"), "сохраняются для дообучения"),
   );
 }
 
@@ -355,6 +357,7 @@ async function saveAsTemplate(it) {
 
 function feedbackMark(it) {
   if (!it.final_text) return null;
+  if (state.info?.public) return null;
   return h("p", { class: "feedback" }, h("span", {}, "Правка сохранена для дообучения"),
     h("button", { class: "link", onclick: () => saveAsTemplate(it) }, "Сделать шаблоном"));
 }
@@ -414,7 +417,7 @@ function processSteps(it) {
 function citesBlock(list) {
   return list.length
     ? h("ul", { class: "cites", "aria-label": "Основания из правил" }, list.map((c) => h("li", { class: "cite" },
-        h("span", { class: "code" }, c.ref), h("span", { class: "section" }, c.section, h("span", { class: "verified" }, " · есть в rules.json")), h("q", {}, c.quote))))
+        h("span", { class: "code" }, c.ref), h("span", { class: "section" }, c.section, h("span", { class: "verified" }, " · есть в rules.json")), c.quote ? h("q", {}, c.quote) : null)))
     : h("p", { class: "no-cites" }, "Без ссылок на правила: в этой ситуации они не нужны.");
 }
 

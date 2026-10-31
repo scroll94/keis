@@ -18,7 +18,7 @@ IN ?= ../grand-support-copilot-handout-2026-10-27/handout/tickets_valid.jsonl
 OUT ?= pred.jsonl
 MODELS = artifacts/classifier.pkl
 
-.PHONY: install predict serve train eval test
+.PHONY: install predict serve public train eval test
 
 # Окружение создаётся само при первом запуске любой команды
 $(PY):
@@ -40,6 +40,11 @@ predict: $(MODELS)
 
 serve: $(MODELS)
 	$(RUN) -m uvicorn copilot.api:app --host 0.0.0.0 --port 8000
+
+# Открытая демо-версия для показа по ссылке: только этот компьютер, снаружи доступна через туннель
+public: export COPILOT_PUBLIC = 1
+public: $(MODELS)
+	$(RUN) -m uvicorn copilot.api:app --host 127.0.0.1 --port 8100
 
 # Полное обучение с отложенной проверкой и метриками
 train: | $(PY)

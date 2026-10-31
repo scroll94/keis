@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import drafts, rules
-from .config import ARTIFACTS, ROOT, VALID_PATH
+from .config import ARTIFACTS, PUBLIC, ROOT, VALID_PATH
 from .llm import PROMISE, REF_LIKE
 from .triage import Triage
 
@@ -50,6 +50,8 @@ FEEDBACK_PATH = ARTIFACTS / "feedback.jsonl"
 LOADTEST_DIR = ARTIFACTS / "loadtests"
 TEMPLATES_PATH = ARTIFACTS / "templates.json"
 MAX_BATCH = 5000
+PUBLIC_MAX_QUEUE = 1000
+PUBLIC_MAX_LOAD = 500
 
 
 # Модели запроса терпимы к типам: кривые поля приводит triage._normalize, а не ошибка 422
@@ -190,9 +192,10 @@ class Queue:
             "template": r["draft"]["template"], "needs_human": r["needs_human"],
             "draft": draft, "final": final, "edited": final != draft,
         }
-        ARTIFACTS.mkdir(exist_ok=True)
-        with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if not PUBLIC:
+            ARTIFACTS.mkdir(exist_ok=True)
+            with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
         return item
 
 
@@ -281,8 +284,9 @@ def index():
 def info():
     llm = queue.triage.llm
     return {
+        "public": PUBLIC,
         "llm": {"provider": llm.provider, "model": llm.model, "rpm": llm.rpm} if llm else None,
-        "validation_available": VALID_PATH.exists(),
+        "validation_available": VALID_PATH.exists() and not PUBLIC,
         "batches": [j.summary() for j in JOBS.values()],
     }
 
@@ -299,6 +303,8 @@ def get_queue():
 
 @app.post("/api/tickets")
 def add_ticket(ticket: Ticket):
+    if PUBLIC and len(queue.items) >= PUBLIC_MAX_QUEUE:
+        raise HTTPException(429, "очередь демо-версии заполнена")
     t = ticket.model_dump(exclude_none=True)
     t.pop("ticket_id", None)
     return queue.add(t, source="form")
@@ -331,6 +337,11 @@ QUICK_REPLIES = [
 ]
 
 
+def _private_only() -> None:
+    if PUBLIC:
+        raise HTTPException(403, "в открытой демо-версии это отключено")
+
+
 def _saved_templates() -> list[dict]:
     return json.loads(TEMPLATES_PATH.read_text(encoding="utf-8")) if TEMPLATES_PATH.exists() else []
 
@@ -347,6 +358,7 @@ def quick_replies(lang: str = "ru"):
 @app.post("/api/templates")
 def save_template(t: TemplateIn):
     """Шаблон из правки: те же запреты, что и для LLM, — без обещаний и без номеров пунктов вне цитат."""
+    _private_only()
     if PROMISE.search(t.text):
         raise HTTPException(400, "в шаблоне есть обещание, которое сервис не может выполнить")
     if REF_LIKE.search(t.text):
@@ -370,12 +382,14 @@ def _start_batch(name: str, tickets: list[dict]) -> dict:
 
 @app.post("/api/batches")
 def start_batch(b: BatchIn):
+    _private_only()
     return _start_batch(b.name, b.tickets)
 
 
 @app.post("/api/batches/sample")
 def start_sample(s: SampleIn):
     """Обращения из валидации кейса, как в скрытом тесте: без ответов администраторов и вердиктов."""
+    _private_only()
     if not VALID_PATH.exists():
         raise HTTPException(404, "данные валидации не найдены: укажите COPILOT_DATA_DIR")
     tickets = _read_tickets(VALID_PATH)
@@ -398,6 +412,8 @@ def job_status(job_id: str):
 
 @app.post("/api/loadtests")
 def start_loadtest(body: LoadIn, request: Request):
+    if PUBLIC and body.n > PUBLIC_MAX_LOAD:
+        raise HTTPException(400, f"в открытой демо-версии не больше {PUBLIC_MAX_LOAD} запросов")
     if any(lt["proc"].poll() is None for lt in LOADTESTS.values()):
         raise HTTPException(409, "проверка нагрузки уже идёт")
     if body.source == "demo":
@@ -416,7 +432,9 @@ def start_loadtest(body: LoadIn, request: Request):
     tickets_path.write_text(json.dumps(tickets, ensure_ascii=False), encoding="utf-8")
     # localhost на Windows сначала пробует IPv6 и теряет ~2 с на каждом новом соединении, если сервис слушает
     # только IPv4: генератор нагрузки ходит на 127.0.0.1, чтобы мерить сервис, а не эту задержку
-    url = str(request.base_url.replace(hostname="127.0.0.1") if request.base_url.hostname == "localhost" else request.base_url)
+    # За туннелем адрес из запроса внешний: нагрузка должна идти на сервис, а не через туннель
+    local = PUBLIC or request.base_url.hostname == "localhost"
+    url = f"http://127.0.0.1:{request.scope['server'][1]}/" if local else str(request.base_url)
     url = url.rstrip("/") + "/triage"
     # Отдельный процесс: генератор нагрузки не отнимает процессор у сервиса, цифры честные
     proc = subprocess.Popen(

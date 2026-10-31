@@ -12,7 +12,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import linear_kernel
 
 from . import rules
-from .config import KB_PATH
+from .config import KB_PATH, PUBLIC
 
 # Категория -> пункты, которые taxonomy.json рекомендует для неё
 CATEGORY_RULES = {
@@ -66,6 +66,8 @@ class KnowledgeBase:
 
     @classmethod
     def get(cls):
+        if PUBLIC:  # в базе реальные ответы администраторов
+            return None
         if cls._inst is None and KB_PATH.exists():
             cls._inst = cls()
         return cls._inst

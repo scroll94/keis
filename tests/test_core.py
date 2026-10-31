@@ -403,6 +403,34 @@ class ChatRequestsTest(unittest.TestCase):
             self.assertEqual(client.post("/api/templates", json={**ok, "text": "Нарушение 7.7."}).status_code, 400)
 
 
+class PublicModeTest(unittest.TestCase):
+    def test_no_case_data_and_no_writes(self):
+        script = """
+import json
+from fastapi.testclient import TestClient
+import copilot.api as api
+from copilot import rules
+c = TestClient(api.app)
+assert c.get("/api/info").json()["public"] is True
+assert api.queue.triage.kb is None and api.queue.triage.llm is None
+assert all(not x["quote"] for it in c.get("/api/queue").json()["items"] for x in it["result"]["draft"]["citations"])
+assert c.post("/api/batches", json={"tickets": [{}]}).status_code == 403
+assert c.post("/api/batches/sample", json={"n": 1}).status_code == 403
+assert c.post("/api/templates", json={"title": "a", "text": "b"}).status_code == 403
+assert c.post("/api/loadtests", json={"n": 501}).status_code == 400
+before = api.FEEDBACK_PATH.stat().st_size if api.FEEDBACK_PATH.exists() else 0
+assert c.post("/api/tickets/demo-001/decision", json={"action": "send"}).status_code == 200
+assert (api.FEEDBACK_PATH.stat().st_size if api.FEEDBACK_PATH.exists() else 0) == before
+"""
+        import subprocess
+        import sys
+
+        env = {**os.environ, "COPILOT_PUBLIC": "1"}
+        r = subprocess.run([sys.executable, "-X", "utf8", "-c", script], cwd=Path(__file__).resolve().parent.parent,
+                           env=env, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+
+
 class ContractTest(unittest.TestCase):
     """Ответ POST /triage по контракту из документа кейса."""
 

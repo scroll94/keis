@@ -17,6 +17,11 @@ def _load_dotenv(path: Path) -> None:
 
 
 _load_dotenv(ROOT / ".env")
+# Открытая демо-версия: ссылку видят посторонние, поэтому на странице нет ничего из данных кейса,
+# а текст посетителей не уходит во внешнюю LLM и не пишется на диск
+PUBLIC = os.environ.get("COPILOT_PUBLIC") == "1"
+if PUBLIC:
+    os.environ["LLM_PROVIDER"] = "none"
 # Папка с выданными данными. По умолчанию — соседняя папка handout, можно переопределить.
 DATA_DIR = Path(os.environ.get(
     "COPILOT_DATA_DIR",
