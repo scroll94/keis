@@ -76,7 +76,7 @@
 ## Запуск
 
 ```bash
-make predict INPUT=tickets.jsonl OUTPUT=predictions.jsonl
+make predict DATA=/путь/к/handout IN=tickets.jsonl OUT=pred.jsonl
 make serve
 ```
 
