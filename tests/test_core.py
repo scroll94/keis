@@ -375,6 +375,34 @@ class StreamAnswersTest(unittest.TestCase):
         self.assertEqual([c["ref"] for c in d["citations"]], ["ОП 2.1"])
 
 
+class ChatRequestsTest(unittest.TestCase):
+    def test_cp1251_kazakh_is_repaired_and_original_kept(self):
+        r = Triage(use_llm=False)(ticket("Мен ќазір текстурада тўрып ќалдым, кјмек беріѕіз", ticket_id="cp", reporter="cp", server_lang="kk"))
+        self.assertEqual(r["text_fix"]["fixed"], "Мен қазір текстурада тұрып қалдым, көмек беріңіз")
+        self.assertIn("ќазір", r["text_fix"]["original"])
+        self.assertEqual(r["language"], "kk")
+
+    def test_clean_text_has_no_fix(self):
+        self.assertIsNone(Triage(use_llm=False)(ticket("застрял в текстурах", ticket_id="cl", reporter="cl"))["text_fix"])
+
+    def test_template_from_edit(self):
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        import copilot.api as api
+
+        client = TestClient(api.app)
+        with tempfile.TemporaryDirectory() as tmp:
+            api.TEMPLATES_PATH = Path(tmp) / "templates.json"
+            ok = {"title": "Спавн", "text": "Проверяем проблему со спавном.", "lang": "ru"}
+            self.assertEqual(client.post("/api/templates", json=ok).status_code, 200)
+            self.assertIn("Спавн", [q["title"] for q in client.get("/api/quick").json()])
+            self.assertNotIn("Спавн", [q["title"] for q in client.get("/api/quick", params={"lang": "uz"}).json()])
+            self.assertEqual(client.post("/api/templates", json={**ok, "text": "Мы снимем вам бан."}).status_code, 400)
+            self.assertEqual(client.post("/api/templates", json={**ok, "text": "Нарушение 7.7."}).status_code, 400)
+
+
 class ContractTest(unittest.TestCase):
     """Ответ POST /triage по контракту из документа кейса."""
 

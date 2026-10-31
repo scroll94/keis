@@ -3,9 +3,8 @@ import re
 
 # На казахских серверах текст прошёл через cp1251: казахские буквы заменены похожими.
 CP1251_KK = str.maketrans({
-    "ќ": "қ", "Ќ": "Қ", "ѓ": "ғ", "Ѓ": "Ғ", "ћ": "һ", "Ћ": "Һ",
-    "ў": "ұ", "Ў": "Ұ", "ї": "ү", "Ї": "Ү", "є": "ә", "Є": "Ә",
-    "ѕ": "ө", "Ѕ": "Ө", "ґ": "ң", "Ґ": "Ң",
+    "ќ": "қ", "Ќ": "Қ", "ѓ": "ғ", "Ѓ": "Ғ", "ґ": "ғ", "Ґ": "Ғ", "ћ": "һ", "Ћ": "Һ",
+    "ў": "ұ", "Ў": "Ұ", "ї": "ү", "Ї": "Ү", "є": "ә", "Є": "Ә", "ѕ": "ң", "Ѕ": "Ң", "ј": "ө", "Ј": "Ө",
 })
 
 KK_LETTERS = set("әғқңөұүһіӘҒҚҢӨҰҮҺІ")
@@ -26,7 +25,7 @@ TOKEN = re.compile(r"<(url|email|handle|digits)>")
 
 def fix_text(text: str, server_lang: str | None = None) -> str:
     text = text or ""
-    if server_lang == "kk" or any(c in text for c in "ќѓћ"):
+    if server_lang == "kk" or any(c in text for c in "ќѓћјѕ"):
         text = text.translate(CP1251_KK)
     text = text.replace(" ", " ")
     return re.sub(r"[ \t]+", " ", text).strip()

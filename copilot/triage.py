@@ -357,6 +357,7 @@ class Triage:
             "draft": draft,
             "needs_human": needs_human,
             "needs_human_reasons": why_h,
+            "text_fix": {"original": raw, "fixed": text} if " ".join(raw.split()) != " ".join(text.split()) else None,
             "suggested_verdict": {"label": verdict, "p": round(vp, 3)} if verdict else None,
             "confidence": round(conf, 3),
             "reasons": reasons,

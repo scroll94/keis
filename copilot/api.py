@@ -7,7 +7,8 @@ GET  /api/queue                     очередь для интерфейса
 POST /api/tickets                   новое обращение из интерфейса
 POST /api/tickets/{id}/decision     решение админа: отправить, сохранить правку, эскалировать
 POST /api/tickets/bulk              то же сразу для многих обращений; reopen отменяет решение
-GET  /api/quick                     быстрые ответы на языке игрока
+GET  /api/quick                     быстрые ответы на языке игрока, с шаблонами из правок
+POST /api/templates                 новый быстрый ответ из правки администратора
 POST /api/batches                   пачка обращений из файла: разбирается в фоне
 POST /api/batches/sample            пачка из валидации кейса (без ответов админов)
 GET  /api/jobs/{id}                 прогресс и сводка пачки
@@ -38,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from . import drafts, rules
 from .config import ARTIFACTS, ROOT, VALID_PATH
+from .llm import PROMISE, REF_LIKE
 from .triage import Triage
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -46,6 +48,7 @@ QUEUE_PATH = Path(os.environ.get("COPILOT_QUEUE", ROOT / "demo" / "tickets.json"
 # Решения админов: правки черновиков — обучающий сигнал для шаблонов и модели
 FEEDBACK_PATH = ARTIFACTS / "feedback.jsonl"
 LOADTEST_DIR = ARTIFACTS / "loadtests"
+TEMPLATES_PATH = ARTIFACTS / "templates.json"
 MAX_BATCH = 5000
 
 
@@ -86,6 +89,12 @@ class BulkDecision(BaseModel):
     ids: list[str]
     action: Literal["send", "escalate", "reopen"]
     text: str | None = None  # общий текст для всех; {ник} заменяется ником из каждого обращения
+
+
+class TemplateIn(BaseModel):
+    title: str = Field(min_length=1, max_length=60)
+    text: str = Field(min_length=1, max_length=2000)
+    lang: str = "ru"
 
 
 class BatchIn(BaseModel):
@@ -139,6 +148,7 @@ class Queue:
         result = (triage or self.triage)(t)  # разбор вне блокировки: решения админа не ждут пачку
         item = {
             "ticket": t, "result": result, "status": "new", "final_text": None, "decided_at": None,
+            "received_at": datetime.now().isoformat(timespec="seconds"),
             "source": source, "processing_ms": round((time.perf_counter() - t0) * 1000, 1),
         }
         with self.lock:
@@ -321,11 +331,30 @@ QUICK_REPLIES = [
 ]
 
 
+def _saved_templates() -> list[dict]:
+    return json.loads(TEMPLATES_PATH.read_text(encoding="utf-8")) if TEMPLATES_PATH.exists() else []
+
+
 @app.get("/api/quick")
 def quick_replies(lang: str = "ru"):
-    return [{"id": s, "title": title, "text": drafts.render(s, lang, codes),
+    base = [{"id": s, "title": title, "text": drafts.render(s, lang, codes),
              "citations": rules.validate_citations([{"ref": c} for c in codes])}
             for s, title, codes in QUICK_REPLIES]
+    return base + [{"id": f"own-{i}", "title": t["title"], "text": t["text"], "citations": []}
+                   for i, t in enumerate(_saved_templates()) if t["lang"] == lang]
+
+
+@app.post("/api/templates")
+def save_template(t: TemplateIn):
+    """Шаблон из правки: те же запреты, что и для LLM, — без обещаний и без номеров пунктов вне цитат."""
+    if PROMISE.search(t.text):
+        raise HTTPException(400, "в шаблоне есть обещание, которое сервис не может выполнить")
+    if REF_LIKE.search(t.text):
+        raise HTTPException(400, "в шаблоне есть номер пункта правил: у сохранённых шаблонов нет цитат")
+    saved = _saved_templates() + [t.model_dump()]
+    ARTIFACTS.mkdir(exist_ok=True)
+    TEMPLATES_PATH.write_text(json.dumps(saved, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"count": len(saved)}
 
 
 def _start_batch(name: str, tickets: list[dict]) -> dict:
