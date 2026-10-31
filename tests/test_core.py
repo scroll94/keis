@@ -9,6 +9,7 @@ import unittest
 from collections import deque
 
 os.environ["LLM_PROVIDER"] = "none"  # тесты не ходят в сеть и не тратят квоту, даже если в .env есть ключ
+os.environ.pop("OPENAI_API_KEY", None)
 from pathlib import Path
 from threading import Lock
 
@@ -454,6 +455,26 @@ class JuryRunTest(unittest.TestCase):
         for text in ("он взломал мой аккаунт", "кинул на донат, деньги списались"):
             r = Triage(use_model=False, use_llm=False)(ticket(text, kind="complaint", ticket_id=text, reporter=text))
             self.assertTrue(r["needs_human"], text)
+
+    def test_openai_key_alone_turns_llm_on(self):
+        """OPENAI_API_KEY=xxx make predict: ключ идёт в OpenAI, а при ошибке остаётся шаблон."""
+        script = """
+import httpx
+from copilot.llm import LLM
+from copilot.triage import Triage
+llm = LLM.from_env()
+assert llm.provider == "openai_compat" and llm.base_url == "https://api.openai.com/v1"
+assert llm.http.headers["authorization"] == "Bearer test-key-123"
+llm.http = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(401)))
+tri = Triage(use_model=False, use_llm=False)
+tri.llm = llm
+r = tri({"ticket_id": "1", "kind": "report", "messages": [{"role": "player", "text": "как заработать денег на сервере?"}]})
+assert r["draft_reply"]["text"] and r["draft"]["llm"]["error"] == "HTTP 401", r["draft"]
+"""
+        env = {k: v for k, v in os.environ.items() if k != "LLM_PROVIDER"}
+        env["OPENAI_API_KEY"] = "test-key-123"
+        r = subprocess.run([sys.executable, "-X", "utf8", "-c", script], cwd=self.ROOT, env=env, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
 
     def test_works_without_case_data(self):
         """На компьютере жюри данных может не быть рядом: разбор не падает, цитат нет, выдуманных тоже."""

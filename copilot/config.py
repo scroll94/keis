@@ -17,6 +17,11 @@ def _load_dotenv(path: Path) -> None:
 
 
 _load_dotenv(ROOT / ".env")
+# Достаточно одного ключа: OPENAI_API_KEY=xxx make predict. Настройки другого провайдера из .env при этом не используются,
+# поэтому его ключ не уйдёт в OpenAI
+if os.environ.get("OPENAI_API_KEY") and os.environ.get("LLM_PROVIDER", "none").strip().lower() in ("", "none"):
+    os.environ.update(LLM_PROVIDER="openai_compat", LLM_API_KEY=os.environ["OPENAI_API_KEY"], LLM_BASE_URL="https://api.openai.com/v1",
+                      LLM_MODEL=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
 # Открытая демо-версия: ссылку видят посторонние, поэтому на странице нет ничего из данных кейса,
 # а текст посетителей не уходит во внешнюю LLM и не пишется на диск
 PUBLIC = os.environ.get("COPILOT_PUBLIC") == "1"
