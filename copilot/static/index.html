@@ -133,6 +133,10 @@
   </form>
 </dialog>
 
-<script src="/static/app.js"></script>
+<script>
+  // Страница открыта без сервера: файлов /static/ нет, поэтому ведём на версию для GitHub Pages
+  function openStaticSite() { location.replace("https://scroll94.github.io/hit/"); }
+</script>
+<script src="/static/app.js" onerror="openStaticSite()"></script>
 </body>
 </html>

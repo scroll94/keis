@@ -19,6 +19,8 @@ from copilot.config import ROOT  # noqa: E402
 
 LANGS = ("ru", "kk", "uz", "en")
 NICK_TOKEN = "__NICK__"
+NOTE = ("Демо кейса Decentrathon 6.0 · RAG-триаж на базе датасета Grand Mobile · Верификация по rules.json · Дешифратор cp1251 · "
+        "Очередь синтетическая: условия кейса запрещают публиковать реальные тикеты")
 COMPLAINTS = {
     "complaint.cheat": "игрок использует aimbot",
     "complaint.insult": "оскорбил меня в чате",
@@ -70,6 +72,27 @@ def archetypes() -> dict:
     return out
 
 
+def write_page(data_js: str) -> None:
+    """Всё в одном index.html: странице нечему не догрузиться, а открывается она сразу."""
+    static = ROOT / "copilot" / "static"
+    inline = lambda code: f"<script>\n{code.replace('</script', '<\\/script')}</script>"  # noqa: E731
+    scripts = "\n".join(inline(code) for code in (
+        data_js, (ROOT / "site" / "shim.js").read_text(encoding="utf-8"), (static / "app.js").read_text(encoding="utf-8")))
+    css = (static / "app.css").read_text(encoding="utf-8")
+    finding = '<p class="finding" id="finding">Загружаю очередь…</p>'
+
+    page = (static / "index.html").read_text(encoding="utf-8")
+    page = page.replace('<link rel="stylesheet" href="/static/app.css">', f"<style>\n{css}</style>")
+    page, fonts = re.subn(r'(<link href="https://fonts\.googleapis\.com/css2[^"]*" rel="stylesheet")>',
+                          lambda m: m.group(1) + """ media="print" onload="this.media='all'">""", page)
+    page, tags = re.subn(r"<script>\s*// Страница открыта без сервера.*?onerror=\"openStaticSite\(\)\"></script>",
+                         lambda _: scripts, page, flags=re.S)
+    page = page.replace('<meta charset="utf-8">', '<meta charset="utf-8">\n  <meta name="robots" content="noindex">')
+    page = page.replace(finding, finding + f'\n        <p class="demo-note">{NOTE}</p>')
+    assert fonts == 1 and tags == 1 and "/static/" not in page.split("<style>")[0] and NOTE in page
+    (ROOT / "index.html").write_text(page, encoding="utf-8")
+
+
 def main():
     data = {
         "items": api.queue.snapshot(),
@@ -94,20 +117,10 @@ def main():
         },
     }
     (ROOT / "site").mkdir(exist_ok=True)
-    (ROOT / "site" / "data.js").write_text(
-        "window.SITE_DATA = " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + ";\n", encoding="utf-8")
+    data_js = "window.SITE_DATA = " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + ";\n"
+    (ROOT / "site" / "data.js").write_text(data_js, encoding="utf-8")
 
-    page = (ROOT / "copilot" / "static" / "index.html").read_text(encoding="utf-8")
-    page = page.replace('href="/static/app.css"', 'href="copilot/static/app.css"')
-    page = page.replace('<script src="/static/app.js"></script>',
-                        '<script src="site/data.js"></script>\n<script src="site/shim.js"></script>\n'
-                        '<script src="copilot/static/app.js"></script>')
-    page = page.replace('<meta charset="utf-8">', '<meta charset="utf-8">\n  <meta name="robots" content="noindex">')
-    finding = '<p class="finding" id="finding">Загружаю очередь…</p>'
-    page = page.replace(finding, finding + '\n        <p class="demo-note">Демонстрация кейса Decentrathon 6.0. '
-                        'Обращения выдуманные, это не официальный сервис Grand Mobile.</p>')
-    assert "site/shim.js" in page and "demo-note" in page and re.search(r'href="/static', page) is None
-    (ROOT / "index.html").write_text(page, encoding="utf-8")
+    write_page(data_js)
     (ROOT / ".nojekyll").write_text("", encoding="utf-8")
     print(f"готово: {len(data['items'])} обращений, {len(data['archetypes'])} готовых разборов")
 

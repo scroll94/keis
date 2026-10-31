@@ -474,6 +474,13 @@ class SiteTest(unittest.TestCase):
         text = (self.ROOT / "site" / "data.js").read_text(encoding="utf-8")
         return json.loads(text[len("window.SITE_DATA = "):].rstrip().rstrip(";"))
 
+    def test_page_is_self_contained(self):
+        page = (self.ROOT / "index.html").read_text(encoding="utf-8")
+        self.assertNotIn("<script src=", page)
+        self.assertNotIn('href="/static', page)
+        self.assertIn("window.SITE_DATA", page)
+        self.assertIn("Очередь синтетическая", page)
+
     def test_no_case_data_on_page(self):
         d = self.data()
         results = [it["result"] for it in d["items"]] + list(d["archetypes"].values())

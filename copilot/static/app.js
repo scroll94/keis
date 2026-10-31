@@ -194,6 +194,7 @@ function renderNav() {
   }, h("span", {}, t.nav || t.title),
     t.id === "batch" && state.job && !state.job.finished ? h("span", { class: "count" }, pct(state.job.done, state.job.total)) : null,
     t.id === "load" && state.load && !state.load.finished ? h("span", { class: "count" }, pct(state.load.done || 0, state.load.total)) : null)));
+  $("nav-tools").previousElementSibling.hidden = !$("nav-tools").children.length;
   $("mode").replaceChildren(
     state.llm
       ? h("p", {}, h("strong", {}, "Черновики: шаблоны и LLM"), `${state.llm.model}${state.info?.llm?.rpm ? `, до ${state.info.llm.rpm} в минуту` : ""}`)
@@ -503,8 +504,8 @@ function renderDetail() {
         h("dl", { class: "steps" }, steps.map(([k, v]) => h("div", { class: "step" }, h("dt", {}, k), h("dd", {}, v))))),
     ),
     h("div", { class: "actions" },
-      h("button", { class: "btn primary", disabled: !open, onclick: () => decide("send") }, "Отправить игроку"),
-      h("button", { class: "btn", disabled: !open, onclick: () => decide("save") }, "Сохранить правку"),
+      h("button", { class: "btn primary", disabled: !open, onclick: () => decide("send") }, "Отправить"),
+      h("button", { class: "btn", id: "edit-btn", disabled: !open, onclick: () => (state.dirty ? decide("save") : $("draft")?.focus()) }, "Править"),
       h("button", { class: "btn", disabled: !open, onclick: () => decide("escalate") }, "Эскалировать"),
       h("span", { class: "status", id: "status", role: "status" }),
     ),
@@ -626,6 +627,7 @@ function showToast(text, undoIds) {
 function updateStatus() {
   const el = $("status");
   if (!el) return;
+  $("edit-btn").textContent = state.dirty ? "Сохранить правку" : "Править";
   const it = selectedItem();
   if (it && it.status !== "new") el.textContent = `Решение принято ${fmtTime(it.decided_at)}`;
   else el.textContent = state.note || (it && it.final_text ? "Черновик изменён администратором" : "");
