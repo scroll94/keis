@@ -462,3 +462,5 @@ kbd { padding: 1px 6px; border: 1px solid var(--control); border-radius: 4px; ba
   --pill-neutral-bg: #222222; --pill-neutral-ink: #d0d0d0;
 }
 :root[data-theme="dark"] select, :root[data-theme="dark"] option { color-scheme: dark; }
+
+.demo-note { margin: 4px 0 0; font-size: var(--fs-small); color: var(--muted); }

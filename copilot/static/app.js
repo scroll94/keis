@@ -189,7 +189,7 @@ function renderNav() {
     class: "nav-item", "aria-current": state.mode === "queue" && state.view === v.id ? "true" : "false",
     onclick: () => switchView(v.id),
   }, h("span", {}, v.title), v.count ? h("span", { class: "count" }, fmtNum(items.filter(v.test).length)) : null)));
-  $("nav-tools").replaceChildren(...TOOLS.filter((t) => !(state.info?.public && t.id === "batch")).map((t) => h("button", {
+  $("nav-tools").replaceChildren(...TOOLS.filter((t) => !(state.info?.public && t.id === "batch") && !(state.info?.static && t.id === "load")).map((t) => h("button", {
     class: "nav-item", "aria-current": state.mode === t.id ? "true" : "false", onclick: () => switchMode(t.id),
   }, h("span", {}, t.nav || t.title),
     t.id === "batch" && state.job && !state.job.finished ? h("span", { class: "count" }, pct(state.job.done, state.job.total)) : null,
@@ -199,7 +199,9 @@ function renderNav() {
       ? h("p", {}, h("strong", {}, "Черновики: шаблоны и LLM"), `${state.llm.model}${state.info?.llm?.rpm ? `, до ${state.info.llm.rpm} в минуту` : ""}`)
       : h("p", {}, h("strong", {}, "Черновики: шаблоны"), "LLM не подключена, $0 за обращение"),
     state.info?.public
-      ? h("p", {}, h("strong", {}, "Открытая демо-версия"), "обращения выдуманные, цитаты правил скрыты, база ответов и LLM выключены, очередь общая для всех")
+      ? h("p", {}, h("strong", {}, "Открытая демо-версия"), state.info.static
+        ? "без сервера: демо-обращения разобраны заранее, новые разбираются в браузере по ключевым словам, решения живут до перезагрузки страницы"
+        : "обращения выдуманные, цитаты правил скрыты, база ответов и LLM выключены, очередь общая для всех")
       : h("p", {}, h("strong", {}, "Решения администраторов"), "сохраняются для дообучения"),
   );
 }

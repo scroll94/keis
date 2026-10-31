@@ -18,7 +18,7 @@ IN ?= ../grand-support-copilot-handout-2026-10-27/handout/tickets_valid.jsonl
 OUT ?= pred.jsonl
 MODELS = artifacts/classifier.pkl
 
-.PHONY: install predict serve public train eval test
+.PHONY: install predict serve public site secrets hooks train eval test
 
 # Окружение создаётся само при первом запуске любой команды
 $(PY):
@@ -45,6 +45,18 @@ serve: $(MODELS)
 public: export COPILOT_PUBLIC = 1
 public: $(MODELS)
 	$(RUN) -m uvicorn copilot.api:app --host 127.0.0.1 --port 8100
+
+# Сайт без сервера для GitHub Pages: index.html и site/data.js
+site: $(MODELS)
+	$(RUN) scripts/build_site.py
+
+# Ключи и данные кейса в git. Историю проверяет: make secrets ARGS=--history
+secrets: | $(PY)
+	$(RUN) scripts/check_secrets.py $(ARGS)
+
+# Та же проверка перед каждым коммитом
+hooks:
+	git config core.hooksPath .githooks
 
 # Полное обучение с отложенной проверкой и метриками
 train: | $(PY)

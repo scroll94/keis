@@ -1,6 +1,8 @@
 """Проверки ключевых гарантий сервиса. Запуск: python -m unittest discover tests"""
 import json
 import os
+import shutil
+import subprocess
 import sys
 import unittest
 from collections import deque
@@ -13,6 +15,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from copilot import drafts, rules  # noqa: E402
+from copilot.classify import keyword_category  # noqa: E402
 from copilot.llm import LLM, PROMISE  # noqa: E402
 from copilot.triage import Triage  # noqa: E402
 
@@ -422,13 +425,104 @@ before = api.FEEDBACK_PATH.stat().st_size if api.FEEDBACK_PATH.exists() else 0
 assert c.post("/api/tickets/demo-001/decision", json={"action": "send"}).status_code == 200
 assert (api.FEEDBACK_PATH.stat().st_size if api.FEEDBACK_PATH.exists() else 0) == before
 """
-        import subprocess
-        import sys
-
         env = {**os.environ, "COPILOT_PUBLIC": "1"}
         r = subprocess.run([sys.executable, "-X", "utf8", "-c", script], cwd=Path(__file__).resolve().parent.parent,
                            env=env, capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(r.returncode, 0, r.stderr[-800:])
+
+
+class SecretsTest(unittest.TestCase):
+    def setUp(self):
+        import importlib.util
+
+        path = Path(__file__).resolve().parent.parent / "scripts" / "check_secrets.py"
+        spec = importlib.util.spec_from_file_location("check_secrets", path)
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+
+    def test_finds_key_formats(self):
+        self.assertTrue(self.m.scan_text("key = 'AIza" + "x" * 35 + "'"))
+        self.assertTrue(self.m.scan_text("sk-" + "a" * 30))
+        self.assertFalse(self.m.scan_text("LLM_API_KEY=AIza... или нового формата AQ...."))
+
+    def test_finds_env_value_in_base64(self):
+        import base64
+        import tempfile
+
+        secret = "not-a-real-key-123456"
+        with tempfile.TemporaryDirectory() as tmp:
+            env = Path(tmp) / ".env"
+            env.write_text(f"LLM_PROVIDER=none\nLLM_API_KEY={secret}\n", encoding="utf-8")
+            needles = self.m.env_values(env)
+        self.assertEqual(len(needles), 4)
+        encoded = base64.b64encode(secret.encode()).decode()
+        self.assertEqual(self.m.scan_text(f"key = atob('{encoded}')", needles), ["значение из .env"])
+        self.assertFalse(self.m.scan_text("обычный текст", needles))
+
+    def test_forbidden_files(self):
+        for name in (".env", ".env.local", "artifacts/kb.pkl", "x/rules.json", "tickets_valid.jsonl"):
+            self.assertTrue(self.m.FORBIDDEN_FILES.search(name), name)
+        for name in (".env.example", "copilot/rules.py", "demo/tickets.json"):
+            self.assertFalse(self.m.FORBIDDEN_FILES.search(name), name)
+
+
+@unittest.skipUnless(shutil.which("node"), "нужен node")
+class SiteTest(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def data(self):
+        text = (self.ROOT / "site" / "data.js").read_text(encoding="utf-8")
+        return json.loads(text[len("window.SITE_DATA = "):].rstrip().rstrip(";"))
+
+    def test_no_case_data_on_page(self):
+        d = self.data()
+        results = [it["result"] for it in d["items"]] + list(d["archetypes"].values())
+        self.assertTrue(all(not c["quote"] for r in results for c in r["draft"]["citations"]))
+        self.assertTrue(all(not c["quote"] for q in d["quick"].values() for x in q for c in x["citations"]))
+        self.assertFalse([r for r in results if r["draft"]["template"] == "question_kb"])
+
+    def test_browser_triage_matches_python_rules(self):
+        checks = [
+            ("report", "задонатил 500 рублей, деньги списались", 0, None, "report.payment", True),
+            ("report", "застрял в текстурах", 0, None, "report.help", True),
+            ("report", "ау", 0, None, "report.offtopic", False),
+            ("complaint", "жб", 0, None, "complaint.invalid", False),
+            ("complaint", "он использует aimbot", 1, "Ivan_Petrov", "complaint.cheat", True),
+            ("complaint", "оскорбил мать в чате", 1, "Ivan_Petrov", "complaint.insult", True),
+        ]
+        script = """
+const fs = require("fs");
+global.window = { fetch: async () => { throw new Error("сеть"); } };
+global.performance = { now: () => 0 };
+eval(fs.readFileSync("site/data.js", "utf8"));
+eval(fs.readFileSync("site/shim.js", "utf8"));
+(async () => {
+  const out = [];
+  for (const [kind, text, images_count, reported_nick] of JSON.parse(process.argv[1])) {
+    const t = { kind, images_count, messages: [{ role: "player", text }] };
+    if (reported_nick) t.reported_nick = reported_nick;
+    const r = await window.fetch("/api/tickets", { method: "POST", body: JSON.stringify(t) });
+    out.push((await r.json()).result);
+  }
+  const ids = ["demo-001"];
+  await window.fetch("/api/tickets/bulk", { method: "POST", body: JSON.stringify({ ids, action: "send" }) });
+  const q = await (await window.fetch("/api/queue")).json();
+  console.log(JSON.stringify({ out, sent: q.items.filter((i) => i.status === "sent").length }));
+})();
+"""
+        r = subprocess.run(["node", "-e", script, json.dumps([c[:4] for c in checks], ensure_ascii=False)], cwd=self.ROOT,
+                           capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+        res = json.loads(r.stdout)
+        self.assertEqual(res["sent"], 1)
+        for c, got in zip(checks, res["out"]):
+            kind, text, images, nick, cat, human = c
+            self.assertEqual(got["category"], cat, text)
+            self.assertEqual(got["needs_human"], human, text)
+            self.assertNotIn("__NICK__", json.dumps(got, ensure_ascii=False))
+            py = keyword_category(kind, text, bool(images))[0]
+            self.assertEqual(got["category"], py, text)
+        self.assertIn("Ivan_Petrov", res["out"][4]["draft"]["text"])
 
 
 class ContractTest(unittest.TestCase):
