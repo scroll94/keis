@@ -481,6 +481,14 @@ class SiteTest(unittest.TestCase):
         self.assertIn("window.SITE_DATA", page)
         self.assertIn("Очередь синтетическая", page)
 
+    def test_queue_is_in_html_without_javascript(self):
+        page = (self.ROOT / "index.html").read_text(encoding="utf-8").split("<script>")[0]
+        self.assertNotIn("Загружаю очередь", page)
+        self.assertGreaterEqual(page.count('class="row-check"'), 15)
+        self.assertRegex(page, r'aria-label="Обращения"><li')
+        for word in ("Отправить", "Править", "Эскалировать", "Архив", "Ждут администратора"):
+            self.assertIn(word, page)
+
     def test_no_case_data_on_page(self):
         d = self.data()
         results = [it["result"] for it in d["items"]] + list(d["archetypes"].values())
