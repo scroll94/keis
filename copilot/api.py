@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 from . import drafts, rules
 from .config import ARTIFACTS, PUBLIC, ROOT, VALID_PATH
 from .llm import PROMISE, REF_LIKE
-from .triage import Triage
+from .triage import Triage, contract_only
 
 STATIC = Path(__file__).resolve().parent / "static"
 # Очередь интерфейса: по умолчанию выдуманный демо-набор; можно указать свой .json или .jsonl
@@ -268,9 +268,12 @@ def health():
 
 
 @app.post("/triage")
-def do_triage(ticket: Ticket):
+def do_triage(ticket: Ticket, full: bool = False):
+    """Строго по контракту кейса; full=1 добавляет поля для отчёта и проверки нагрузки."""
     t0 = time.perf_counter()
     out = triage(ticket.model_dump())
+    if not full:
+        return contract_only(out)
     out["latency_ms"] = round((time.perf_counter() - t0) * 1000, 1)
     return out
 
@@ -435,7 +438,7 @@ def start_loadtest(body: LoadIn, request: Request):
     # За туннелем адрес из запроса внешний: нагрузка должна идти на сервис, а не через туннель
     local = PUBLIC or request.base_url.hostname == "localhost"
     url = f"http://127.0.0.1:{request.scope['server'][1]}/" if local else str(request.base_url)
-    url = url.rstrip("/") + "/triage"
+    url = url.rstrip("/") + "/triage?full=1"
     # Отдельный процесс: генератор нагрузки не отнимает процессор у сервиса, цифры честные
     proc = subprocess.Popen(
         [sys.executable, "-X", "utf8", "-m", "copilot.loadgen", "--url", url, "--tickets", str(tickets_path),

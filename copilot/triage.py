@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from . import drafts, rules
-from .classify import Model, VerdictModel, keyword_category, priority
+from .classify import KW, Model, VerdictModel, keyword_category, priority
 from .features import category_input, n_attachments, verdict_input
 from .llm import LLM
 from .normalize import content_text, detect_lang, fix_text
@@ -30,6 +30,7 @@ RACISM_HINT = re.compile(r"расизм|наци|национал|рели|ка�
 THREAT_HINT = re.compile(r"угрож|деанон|адрес|найду|вычислю|докс", re.I)
 
 NEEDS_HUMAN_ALWAYS = {"report.account", "report.payment", "complaint.admin"}
+ACCOUNT_OR_PAYMENT = re.compile(f'{KW["report.payment"]}|{KW["report.account"]}', re.I)
 
 # Шаблон по вероятному вердикту берётся, только если модель уверена. Пороги подобраны на валидации так,
 # чтобы совпадение с решением админа было не ниже ~70% (need_evidence при 0.7 — 79%, appeal_rejected при 0.6 — 71%).
@@ -132,6 +133,13 @@ def with_contract(r: dict) -> dict:
         "reasons": r["reasons"],
     }
     return {**contract, **{k: v for k, v in r.items() if k not in contract}}
+
+
+def contract_only(r: dict) -> dict:
+    """Ровно поля контракта: так отвечает POST /triage и пишет make predict."""
+    out = {k: r[k] for k in CONTRACT_KEYS}
+    out["extracted"] = {k: r["extracted"][k] for k in ("nickname", "rule_refs", "has_evidence", "server")}
+    return out
 
 
 def _fallback(t, error: Exception) -> dict:
@@ -337,6 +345,9 @@ class Triage:
             needs_human, why_h = True, why_h + ["ответ из базы стоит проверить администратору"]
         if llm_meta.get("needs_human"):
             needs_human, why_h = True, why_h + [f"LLM: {llm_meta.get('reason') or 'нужен администратор'}"]
+        # Платёж или взлом внутри жалобы: категория другая, но решать всё равно человеку
+        if kind == "complaint" and cat not in NEEDS_HUMAN_ALWAYS and ACCOUNT_OR_PAYMENT.search(text):
+            needs_human, why_h = True, why_h + ["в жалобе упомянуты платёж или доступ к аккаунту"]
         if PROMISE_RISK.search(text):
             needs_human, why_h = True, why_h + ["просьба о возврате или снятии наказания"]
         if prio == "p0":

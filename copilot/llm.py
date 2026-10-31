@@ -5,10 +5,10 @@ LLM_PROVIDER=anthropic      Claude через официальный SDK: ANTHRO
 LLM_PROVIDER=openai_compat  DeepSeek / Gemini / Ollama / OpenAI через их OpenAI-совместимый API:
                             LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
 LLM_PRICE_IN, LLM_PRICE_OUT цена в $ за 1М входных / выходных токенов (для расчёта стоимости тикета)
-LLM_TIMEOUT                 таймаут вызова в секундах (по умолчанию 4): при превышении — шаблон
+LLM_TIMEOUT                 таймаут вызова в секундах (по умолчанию 3): при превышении — шаблон
 LLM_RPM                     сколько вызовов в минуту разрешает тариф (бесплатный Gemini — 15); 0 — без ограничения
 LLM_MAX_WAIT                сколько секунд можно ждать свободный слот (по умолчанию 0: HTTP-сервис не ждёт,
-                            сразу ставит шаблон). Пакетный прогон (scripts/predict.py) ждёт сам.
+                            сразу ставит шаблон). Пакетный прогон (predict.py) ждёт сам.
 
 Любой ответ модели проходит проверки: цитаты только из выданного списка пунктов, никаких
 упоминаний других пунктов, никаких обещаний разбана/возврата/наказания, язык совпадает с языком
@@ -80,7 +80,7 @@ class LLM:
     def __init__(self):
         self.provider = os.environ.get("LLM_PROVIDER", "none").strip().lower()
         self.model = os.environ.get("LLM_MODEL", "").strip()
-        self.timeout = float(os.environ.get("LLM_TIMEOUT", "4"))
+        self.timeout = float(os.environ.get("LLM_TIMEOUT", "3"))
         self.price_in = float(os.environ.get("LLM_PRICE_IN") or 0)
         self.price_out = float(os.environ.get("LLM_PRICE_OUT") or 0)
         self.rpm = int(os.environ.get("LLM_RPM") or 0)

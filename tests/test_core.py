@@ -1,6 +1,7 @@
 """Проверки ключевых гарантий сервиса. Запуск: python -m unittest discover tests"""
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -431,6 +432,45 @@ assert (api.FEEDBACK_PATH.stat().st_size if api.FEEDBACK_PATH.exists() else 0) =
         self.assertEqual(r.returncode, 0, r.stderr[-800:])
 
 
+class JuryRunTest(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parent.parent
+    COMPLAINT = {"kind": "complaint", "messages": [{"role": "player", "text": "оскорбил мать в чате, скрин есть", "attachments": 2}]}
+
+    def test_triage_is_strictly_the_contract(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        out = TestClient(app).post("/triage", json=self.COMPLAINT).json()
+        self.assertEqual(list(out), ["ticket_id", "lang", "category", "priority", "is_spam_or_duplicate", "extracted",
+                                     "draft_reply", "needs_human", "confidence", "reasons"])
+        self.assertEqual(list(out["extracted"]), ["nickname", "rule_refs", "has_evidence", "server"])
+        self.assertEqual(list(out["draft_reply"]), ["lang", "text", "cited"])
+        self.assertTrue(out["extracted"]["has_evidence"])
+        full = TestClient(app).post("/triage", params={"full": 1}, json=self.COMPLAINT).json()
+        self.assertIn("draft", full)
+
+    def test_payment_or_hack_inside_complaint_goes_to_human(self):
+        for text in ("он взломал мой аккаунт", "кинул на донат, деньги списались"):
+            r = Triage(use_model=False, use_llm=False)(ticket(text, kind="complaint", ticket_id=text, reporter=text))
+            self.assertTrue(r["needs_human"], text)
+
+    def test_works_without_case_data(self):
+        """На компьютере жюри данных может не быть рядом: разбор не падает, цитат нет, выдуманных тоже."""
+        script = """
+from copilot.triage import Triage
+t = {"ticket_id": "1", "kind": "complaint", "messages": [{"role": "player", "text": "оскорбил мать в чате", "attachments": 1}]}
+r = Triage(use_model=False, use_llm=False)(t)
+assert r["category"] == "complaint.insult", r
+assert r["draft_reply"]["cited"] == [] and r["needs_human"]
+assert not any("ошибка разбора" in s for s in r["reasons"]), r["reasons"]
+assert "Здравствуйте" in r["draft_reply"]["text"]
+"""
+        env = {**os.environ, "COPILOT_DATA_DIR": str(self.ROOT / "нет-такой-папки")}
+        r = subprocess.run([sys.executable, "-X", "utf8", "-c", script], cwd=self.ROOT, env=env, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+
+
 class SecretsTest(unittest.TestCase):
     def setUp(self):
         import importlib.util
@@ -471,8 +511,11 @@ class SiteTest(unittest.TestCase):
     ROOT = Path(__file__).resolve().parent.parent
 
     def data(self):
-        text = (self.ROOT / "site" / "data.js").read_text(encoding="utf-8")
-        return json.loads(text[len("window.SITE_DATA = "):].rstrip().rstrip(";"))
+        return json.loads(self.data_js()[len("window.SITE_DATA = "):].rstrip().rstrip(";"))
+
+    def data_js(self):
+        page = (self.ROOT / "index.html").read_text(encoding="utf-8")
+        return re.search(r"<script>\n(window\.SITE_DATA = .*?)</script>", page, re.S).group(1)
 
     def test_page_is_self_contained(self):
         page = (self.ROOT / "index.html").read_text(encoding="utf-8")
@@ -509,7 +552,7 @@ class SiteTest(unittest.TestCase):
 const fs = require("fs");
 global.window = { fetch: async () => { throw new Error("сеть"); } };
 global.performance = { now: () => 0 };
-eval(fs.readFileSync("site/data.js", "utf8"));
+eval(fs.readFileSync(0, "utf8"));
 eval(fs.readFileSync("site/shim.js", "utf8"));
 (async () => {
   const out = [];
@@ -526,7 +569,7 @@ eval(fs.readFileSync("site/shim.js", "utf8"));
 })();
 """
         r = subprocess.run(["node", "-e", script, json.dumps([c[:4] for c in checks], ensure_ascii=False)], cwd=self.ROOT,
-                           capture_output=True, text=True, encoding="utf-8")
+                           input=self.data_js(), capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(r.returncode, 0, r.stderr[-800:])
         res = json.loads(r.stdout)
         self.assertEqual(res["sent"], 1)
@@ -588,7 +631,7 @@ class ApiTest(unittest.TestCase):
         from copilot.api import app
 
         client = TestClient(app)
-        r = client.post("/triage", json={"ticket_id": "api1", "kind": "report",
+        r = client.post("/triage", params={"full": 1}, json={"ticket_id": "api1", "kind": "report",
                                          "messages": [{"role": "player", "text": "застрял под землёй, помогите выбраться"}]})
         self.assertEqual(r.status_code, 200)
         body = r.json()

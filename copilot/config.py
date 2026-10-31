@@ -22,11 +22,18 @@ _load_dotenv(ROOT / ".env")
 PUBLIC = os.environ.get("COPILOT_PUBLIC") == "1"
 if PUBLIC:
     os.environ["LLM_PROVIDER"] = "none"
-# Папка с выданными данными. По умолчанию — соседняя папка handout, можно переопределить.
-DATA_DIR = Path(os.environ.get(
-    "COPILOT_DATA_DIR",
-    ROOT.parent / "grand-support-copilot-handout-2026-10-27" / "handout",
-))
+
+
+def _find_data_dir() -> Path:
+    """Папка с выданными данными: COPILOT_DATA_DIR, соседняя папка handout или рядом с проектом."""
+    if os.environ.get("COPILOT_DATA_DIR"):
+        return Path(os.environ["COPILOT_DATA_DIR"])
+    candidates = [ROOT.parent / "grand-support-copilot-handout-2026-10-27" / "handout",
+                  ROOT / "handout", ROOT / "data", ROOT, Path.cwd()]
+    return next((p for p in candidates if (p / "rules.json").exists()), candidates[0])
+
+
+DATA_DIR = _find_data_dir()
 ARTIFACTS = ROOT / "artifacts"
 
 RULES_PATH = DATA_DIR / "rules.json"

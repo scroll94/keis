@@ -183,9 +183,7 @@ def main():
             "en": js_regex(normalize.EN_WORDS.pattern),
         },
     }
-    (ROOT / "site").mkdir(exist_ok=True)
     data_js = "window.SITE_DATA = " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + ";\n"
-    (ROOT / "site" / "data.js").write_text(data_js, encoding="utf-8")
 
     write_page(data_js, data["items"])
     (ROOT / ".nojekyll").write_text("", encoding="utf-8")

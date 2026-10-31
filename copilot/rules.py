@@ -1,6 +1,7 @@
 """Индекс правил: поиск пунктов, цитаты и проверка, что цитата существует."""
 import json
 import re
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -49,6 +50,9 @@ class Point:
 
 @lru_cache(maxsize=1)
 def load_points() -> dict[str, Point]:
+    if not RULES_PATH.exists():
+        print(f"Нет {RULES_PATH}: черновики будут без цитат. Укажите папку данных: COPILOT_DATA_DIR или DATA=", file=sys.stderr)
+        return {}
     data = json.loads(RULES_PATH.read_text(encoding="utf-8"))
     points = {}
     for sec in data["rules"]:

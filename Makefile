@@ -27,26 +27,27 @@ $(PY):
 
 # Модели обучаются сами, если их ещё нет: один раз, около 5 минут.
 # В репозитории их нет, потому что они получены из данных кейса.
+# Если данных для обучения нет, сервис работает на правилах и ключевых словах, поэтому ошибка здесь не останавливает make.
 $(MODELS): | $(PY)
-	$(RUN) scripts/build_kb.py
-	$(RUN) scripts/train.py --fast
+	-$(RUN) scripts/build_kb.py
+	-$(RUN) scripts/train.py --fast
 
 install:
 	$(PYTHON) -m venv .venv
 	$(RUN) -m pip install -r requirements.txt
 
 predict: $(MODELS)
-	$(RUN) scripts/predict.py --in $(IN) --out $(OUT)
+	$(RUN) predict.py --in $(IN) --out $(OUT)
 
 serve: $(MODELS)
-	$(RUN) -m uvicorn copilot.api:app --host 0.0.0.0 --port 8000
+	$(RUN) -m uvicorn main:app --host 0.0.0.0 --port 8000
 
 # Открытая демо-версия для показа по ссылке: только этот компьютер, снаружи доступна через туннель
 public: export COPILOT_PUBLIC = 1
 public: $(MODELS)
-	$(RUN) -m uvicorn copilot.api:app --host 127.0.0.1 --port 8100
+	$(RUN) -m uvicorn main:app --host 127.0.0.1 --port 8100
 
-# Сайт без сервера для GitHub Pages: index.html и site/data.js
+# Сайт без сервера для GitHub Pages: всё в одном index.html
 site: $(MODELS)
 	$(RUN) scripts/build_site.py
 

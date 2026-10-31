@@ -6,8 +6,8 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from copilot.triage import Triage  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from copilot.triage import Triage, contract_only  # noqa: E402
 
 
 def read_jsonl(path: str):
@@ -21,6 +21,7 @@ def main():
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--no-model", action="store_true")
+    ap.add_argument("--full", action="store_true", help="добавить поля для отчёта к полям контракта")
     ap.add_argument("--llm-wait", type=float, default=120,
                     help="сколько секунд можно ждать квоту LLM (LLM_RPM) на одном тикете: пакету важна полнота, а не секунды")
     args = ap.parse_args()
@@ -41,7 +42,7 @@ def main():
         lat.append(time.perf_counter() - t0 - wait)
     with open(args.out, "w", encoding="utf-8") as f:
         for r in results:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            f.write(json.dumps(r if args.full else contract_only(r), ensure_ascii=False) + "\n")
     lat.sort()
     p95 = lat[int(len(lat) * 0.95) - 1] if lat else 0
     calls = sum(1 for r in results if r["draft"].get("llm"))
