@@ -5,6 +5,9 @@ data/
 # Всё, что получено из данных кейса: модели, база знаний, предсказания, отчёты
 artifacts/
 .env
+.env.*
+!.env.example
+*.pem
 .venv/
 __pycache__/
 *.pyc

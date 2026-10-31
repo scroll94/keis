@@ -1,0 +1,6 @@
+#!/bin/sh
+# Не даёт закоммитить ключи и данные кейса. Подключается командой make hooks.
+PY=.venv/Scripts/python.exe
+[ -x "$PY" ] || PY=.venv/bin/python
+[ -x "$PY" ] || PY=python3
+exec "$PY" -X utf8 scripts/check_secrets.py
