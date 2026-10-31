@@ -45,6 +45,7 @@ const VIEWS = [
   { id: "all", title: "Все обращения", test: () => true, empty: "Обращений нет." },
   { id: "escalated", title: "Эскалированы", test: (it) => it.status === "escalated", empty: "Эскалированных обращений пока нет." },
   { id: "sent", title: "Отправлены", test: (it) => it.status === "sent", empty: "Отправленных ответов пока нет." },
+  { id: "archive", title: "Архив", test: (it) => it.status !== "new", empty: "Закрытых обращений пока нет." },
 ];
 const TOOLS = [
   { id: "batch", title: "Загрузка обращений", sub: "Файл с обращениями разбирается тем же конвейером, что и обращения из игры. Каждое обращение попадает в очередь." },
@@ -140,7 +141,8 @@ function visibleItems() {
     .filter(currentView().test)
     .filter((it) => matchesSearch(it, q))
     .filter((it) => { const tags = tagsOf(it); return [...state.tags].every((t) => tags.includes(t)); })
-    .sort((a, b) => priorityRank(a) - priorityRank(b) || String(a.ticket.created_at || "").localeCompare(String(b.ticket.created_at || "")));
+    .sort((a, b) => (state.view === "archive" ? String(b.decided_at || "").localeCompare(String(a.decided_at || "")) : 0)
+      || priorityRank(a) - priorityRank(b) || String(a.ticket.created_at || "").localeCompare(String(b.ticket.created_at || "")));
 }
 
 // Группа похожих: та же тема, тот же ответ, тот же язык — такие обращения можно закрыть разом
@@ -329,14 +331,50 @@ function fact(label, value, note) {
 const humanize = (s) => String(s).replace(/(complaint|report)\.[a-z_]+/g, (code) => `«${CATEGORY[code] || code}»`);
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
+const clock = (iso) => (iso ? new Date(iso).toLocaleTimeString("ru-RU") : "—");
+
+function timeline(it) {
+  return h("dl", { class: "timeline" },
+    h("div", {}, h("dt", {}, "Принято"), h("dd", { class: "num" }, clock(it.received_at))),
+    h("div", {}, h("dt", {}, "Разобрано"), h("dd", { class: "num" }, `за ${fmtMs(it.processing_ms)}`)),
+    h("div", {}, h("dt", {}, it.status === "sent" ? "Отправлено" : "Эскалировано"), h("dd", { class: "num" }, clock(it.decided_at))));
+}
+
+// Шаблон из правки: появится среди быстрых ответов на этом языке
+async function saveAsTemplate(it) {
+  const title = prompt("Название шаблона", CATEGORY[it.result.category] || "");
+  if (!title) return;
+  const res = await fetch("/api/templates", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, text: it.final_text, lang: it.result.draft.language }),
+  });
+  const data = await res.json();
+  delete state.quick[it.result.draft.language];
+  showToast(res.ok ? "Шаблон сохранён, он есть среди быстрых ответов" : data.detail);
+}
+
+function feedbackMark(it) {
+  if (!it.final_text) return null;
+  return h("p", { class: "feedback" }, h("span", {}, "Правка сохранена для дообучения"),
+    h("button", { class: "link", onclick: () => saveAsTemplate(it) }, "Сделать шаблоном"));
+}
+
+// Быстрый просмотр обращения, на которое можно ответить без администратора
+function blindBadges(it) {
+  const r = it.result, cited = r.draft_reply.cited;
+  return h("dl", { class: "badges" }, [["Язык", LANG[r.language] || r.language], ["Суть", CATEGORY[r.category] || r.category],
+    ["Правило", cited[0] || "не требуется"], ["Уверенность", `${Math.round(r.confidence * 100)}%`]].map(([k, v]) =>
+      h("div", {}, h("dt", {}, k), h("dd", {}, v))));
+}
+
 function decisionBox(it) {
   const r = it.result;
   if (it.status === "sent") {
     return h("div", { class: "decision done" }, h("h3", {}, "Ответ отправлен"),
-      h("p", {}, `${fmtTime(it.decided_at)}${it.final_text ? ", с правкой администратора" : ", черновик без изменений"}.`));
+      h("p", {}, it.final_text ? "С правкой администратора." : "Черновик без изменений."), timeline(it), feedbackMark(it));
   }
   if (it.status === "escalated") {
-    return h("div", { class: "decision done" }, h("h3", {}, "Передано старшей администрации"), h("p", {}, `${fmtTime(it.decided_at)}.`));
+    return h("div", { class: "decision done" }, h("h3", {}, "Передано старшей администрации"), timeline(it), feedbackMark(it));
   }
   if (r.needs_human) {
     return h("div", { class: "decision human" }, h("h3", {}, "Нужен администратор"),
@@ -376,7 +414,7 @@ function processSteps(it) {
 function citesBlock(list) {
   return list.length
     ? h("ul", { class: "cites", "aria-label": "Основания из правил" }, list.map((c) => h("li", { class: "cite" },
-        h("span", { class: "code" }, c.ref), h("span", { class: "section" }, c.section), h("q", {}, c.quote))))
+        h("span", { class: "code" }, c.ref), h("span", { class: "section" }, c.section, h("span", { class: "verified" }, " · есть в rules.json")), h("q", {}, c.quote))))
     : h("p", { class: "no-cites" }, "Без ссылок на правила: в этой ситуации они не нужны.");
 }
 
@@ -429,11 +467,13 @@ function renderDetail() {
         h("span", { class: "d-lang" }, LANG[r.language] || r.language)),
       h("div", { class: "chips detail-tags" }, tagsOf(it).filter((tag) => !tag.startsWith("flag:")).map((tag) =>
         h("button", { class: `chip${state.tags.has(tag) ? " on" : ""}`, title: "Показать все такие обращения", onclick: () => toggleTag(tag) }, tagLabel(tag)))),
+      open && !r.needs_human ? blindBadges(it) : null,
       decisionBox(it),
       similarBlock(it),
       h("section", { class: "block" },
         h("div", { class: "block-head" }, h("h3", {}, "Сообщение игрока"), h("span", { class: "meta" }, "слова игрока, не проверены")),
-        h("p", { class: "message" }, playerText(t) || "—"),
+        h("p", { class: "message" }, clean(r.text_fix?.fixed) || playerText(t) || "—"),
+        r.text_fix ? h("p", { class: "text-fix" }, h("strong", {}, "Кодировка исправлена. "), "Исходник: ", clean(r.text_fix.original)) : null,
         accused.map((m) => h("p", { class: "message" }, h("span", { class: "who" }, "Комментарий обвиняемого"), clean(m.text)))),
       h("section", { class: "block" },
         h("div", { class: "block-head" }, h("h3", {}, "Что известно")),
@@ -568,12 +608,12 @@ async function bulkDecide(action) {
 function showToast(text, undoIds) {
   const el = $("toast");
   clearTimeout(timers.toast);
-  el.replaceChildren(h("span", {}, text), undoIds ? h("button", { class: "link toast-undo", onclick: async () => {
+  el.replaceChildren(h("span", {}, text), ...(undoIds ? [h("button", { class: "link toast-undo", onclick: async () => {
     el.hidden = true;
     await postBulk(undoIds, "reopen");
     reselect();
     render();
-  } }, "Отменить") : null);
+  } }, "Отменить")] : []));
   el.hidden = false;
   timers.toast = setTimeout(() => { el.hidden = true; }, 10000);
 }
@@ -1081,6 +1121,12 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.ctrlKey || e.metaKey || e.altKey || state.mode !== "queue") return;
   const it = selectedItem();
+  // Режим «вслепую»: Enter или пробел отправляют только то, что не требует администратора
+  if ((e.key === "Enter" || e.key === " ") && !e.target.matches?.("button, a, summary, label")) {
+    e.preventDefault();
+    if (!state.checked.size && selectedItem()?.status === "new" && !selectedItem().result.needs_human) decide("send");
+    return;
+  }
   const actions = {
     j: () => moveSelection(1), ArrowDown: () => moveSelection(1),
     k: () => moveSelection(-1), ArrowUp: () => moveSelection(-1),
@@ -1098,6 +1144,48 @@ document.addEventListener("keydown", (e) => {
   }
 });
 $("help-btn").addEventListener("click", () => $("help-dialog").showModal());
+
+// Поток выдуманных обращений: появляются в очереди по одному, разбор настоящий
+$("stream-btn").addEventListener("click", async () => {
+  const btn = $("stream-btn"), demo = state.items.filter((it) => it.source === "demo").map((it) => it.ticket);
+  if (!demo.length) return;
+  btn.disabled = true;
+  state.mode = "queue";
+  state.view = "all";
+  state.source = "all";
+  const total = 30, stamp = Date.now(), latency = [];
+  for (let i = 0; i < total; i++) {
+    const { ticket_id, created_at, ...t } = demo[i % demo.length];
+    t.reporter_hash = `flow-${stamp}-${i}`;
+    if (t.reported_hash) t.reported_hash = `flow-${stamp}-${i}`;
+    const res = await fetch("/api/tickets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(t) });
+    if (res.ok) {
+      const item = await res.json();
+      state.items.push(item);
+      latency.push(item.processing_ms);
+    }
+    renderNav();
+    renderFinding();
+    renderList();
+    showToast(`Поток: ${i + 1} из ${total}, разбор ${fmtMs(latency.reduce((a, b) => a + b, 0) / (latency.length || 1))} в среднем`);
+    await new Promise((r) => setTimeout(r, 120));
+  }
+  btn.disabled = false;
+  reselect();
+  render();
+});
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  $("theme-btn").textContent = theme === "dark" ? "Светлая" : "Тёмная";
+  try { localStorage.setItem("theme", theme); } catch { /* тема просто не запомнится */ }
+}
+$("theme-btn").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+{
+  let saved = null;
+  try { saved = localStorage.getItem("theme"); } catch { /* браузер запретил хранилище */ }
+  applyTheme(saved || "light");
+}
 setupDialog();
 fetch("/api/info").then((r) => r.json()).then((info) => { state.info = info; render(); }).catch(() => {});
 loadQueue(true);
